@@ -151,6 +151,14 @@ services:
     depends_on:
       billing: {condition: service_started}
     ports: ["8090:8090"]
+    # The load generator is not a health-reporting worker; it inherits the
+    # worker image but serves only its control port, so the image's default
+    # HEALTHCHECK does not apply to it.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/',timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     restart: unless-stopped
 
   dashboard:
