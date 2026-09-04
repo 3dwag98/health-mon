@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worker-health"
+version = "0.1.0"
+description = "Operational health for message-driven Python workers: dependency, processing and liveness signals derived from the worker's own connections."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+postgres = ["sqlalchemy>=2.0", "psycopg[binary]>=3.1"]
+rabbitmq = ["pika>=1.3"]
+redis = ["redis>=4.6"]
+all = ["sqlalchemy>=2.0", "psycopg[binary]>=3.1", "pika>=1.3", "redis>=4.6"]
+dev = [
+  "pytest>=8", "pytest-timeout", "httpx",
+  "sqlalchemy>=2.0", "psycopg[binary]>=3.1", "pika>=1.3", "redis>=4.6",
+]
+
+[project.scripts]
+worker-health = "worker_health.transports.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 180
+markers = [
+  "unit: no containers, must run with the docker daemon stopped",
+  "integration: needs the compose dependency stack",
+  "faults: fault injection via toxiproxy",
+  "slow: over ten seconds",
+]

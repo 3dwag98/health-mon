@@ -1,0 +1,46 @@
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Optional: trust extra CAs when building behind a TLS-intercepting proxy.
+# docker/certs/ ships with only a .keep file, so this is a no-op normally.
+COPY docker/certs/ /opt/certs/
+RUN set -eu; \
+    if ls /opt/certs/*.crt >/dev/null 2>&1; then \
+      cat /opt/certs/*.crt >> /etc/ssl/certs/ca-certificates.crt; \
+      # pip ships its own certifi bundle and ignores the system store, and
+      # PEP 517 build isolation spawns a child pip, so the trust has to be
+      # configured in a file both of them read.
+      printf '[global]\ncert = /etc/ssl/certs/ca-certificates.crt\n' > /etc/pip.conf; \
+      echo "trusting $(ls /opt/certs/*.crt | wc -l) extra CA certificate(s)"; \
+    fi
+
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir -e ".[all]"
+
+COPY workers/ ./workers/
+COPY tests/ ./tests/
+
+WORKDIR /app/workers
+EXPOSE 8080
+
+# Uses the package's own CLI probe, so the container's notion of healthy is
+# the same one the dashboard and PM2 see.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+  CMD worker-health --url http://127.0.0.1:8080 || exit 1
+
+CMD ["python", "worker_billing.py"]
+
+# ---------------------------------------------------------------------------- #
+# Test image: the runtime image plus the dev tooling. Kept as a separate stage
+# so pytest never ships in the image that runs in production.
+FROM runtime AS tests
+WORKDIR /app
+RUN pip install --no-cache-dir "pytest>=8" pytest-timeout
+WORKDIR /app
+CMD ["pytest", "-q", "tests"]

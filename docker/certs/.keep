@@ -1,0 +1,5 @@
+# Optional build-time CA certificates.
+#
+# Drop a .crt here when building behind a TLS-intercepting corporate proxy;
+# the Dockerfile appends anything present to the image trust store. Empty on
+# a normal machine, where it is a no-op.

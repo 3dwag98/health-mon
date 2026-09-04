@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+build/
+dist/
+.venv/
+venv/
+# Build-time CA certs are environment-specific; the directory is kept, the
+# certificates are not committed.
+docker/certs/*.crt

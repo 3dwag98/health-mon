@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+
+# Standard library only: the aggregator has no third-party dependencies.
+COPY dashboard/ ./dashboard/
+
+EXPOSE 9000
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9000/healthz',timeout=2)" || exit 1
+
+CMD ["python", "dashboard/app.py"]

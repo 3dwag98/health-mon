@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worker Health — Fleet</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg:#f4f6f7; --surface:#ffffff; --sunk:#eceff1; --rule:#d6dee0; --rule-soft:#e6ecee;
+    --ink:#101819; --ink-2:#3f5155; --muted:#63767a;
+    --accent:#0d6b75;
+    --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+    --good-bg:#e6f4e6; --warning-bg:#fdf3dc; --serious-bg:#fbeee7; --critical-bg:#f9e5e5;
+    --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+    --mono:"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg:#0e1416; --surface:#161f22; --sunk:#1d282c; --rule:#2a373b; --rule-soft:#212d31;
+      --ink:#e8eef0; --ink-2:#bccace; --muted:#8ea0a5;
+      --accent:#54c0cb;
+      --good-bg:#122a12; --warning-bg:#2e2510; --serious-bg:#2f1f17; --critical-bg:#2e1616;
+      --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:#0e1416; --surface:#161f22; --sunk:#1d282c; --rule:#2a373b; --rule-soft:#212d31;
+    --ink:#e8eef0; --ink-2:#bccace; --muted:#8ea0a5;
+    --accent:#54c0cb;
+    --good-bg:#122a12; --warning-bg:#2e2510; --serious-bg:#2f1f17; --critical-bg:#2e1616;
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;}
+  .wrap{max-width:1280px;margin:0 auto;padding:20px 22px 64px}
+
+  header.top{display:flex;align-items:flex-end;justify-content:space-between;
+    gap:20px;flex-wrap:wrap;padding-bottom:14px;border-bottom:2px solid var(--ink)}
+  h1{margin:0;font-size:20px;letter-spacing:-.01em;font-weight:650}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button{font:inherit;font-size:12.5px;padding:6px 11px;border:1px solid var(--rule);
+    background:var(--surface);color:var(--ink-2);border-radius:4px;cursor:pointer}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  #banner{display:none;margin:14px 0 0;padding:11px 15px;border-radius:4px;
+    border:1px solid var(--critical);background:var(--critical-bg);color:var(--ink);
+    font-size:13px;font-weight:550}
+  #banner.on{display:block}
+
+  .fleetbar{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 6px}
+  .kpi{flex:1 1 170px;background:var(--surface);border:1px solid var(--rule);
+    border-radius:5px;padding:12px 14px}
+  .kpi .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+  .kpi .v{font-family:var(--mono);font-size:22px;font-weight:600;margin-top:5px;
+    font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .kpi .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
+
+  .worker{background:var(--surface);border:1px solid var(--rule);border-radius:6px;
+    margin-top:14px;overflow:hidden}
+  .whead{display:flex;align-items:center;gap:14px;padding:13px 16px;flex-wrap:wrap;
+    border-left:4px solid var(--rule)}
+  .whead.ok{border-left-color:var(--good)}
+  .whead.degraded{border-left-color:var(--warning)}
+  .whead.failing{border-left-color:var(--critical)}
+  .whead.starting{border-left-color:var(--serious)}
+  .whead.gone{border-left-color:var(--critical)}
+  .wname{font-weight:650;font-size:15px}
+  .wmeta{color:var(--muted);font-size:12px;font-family:var(--mono)}
+  .spacer{flex:1}
+
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:650;
+    letter-spacing:.03em;text-transform:uppercase;padding:3px 8px;border-radius:3px;
+    white-space:nowrap}
+  .pill .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .p-ok{color:#0a7a0a;background:var(--good-bg)}
+  .p-ok .dot{background:var(--good)}
+  .p-degraded{color:#8a6000;background:var(--warning-bg)}
+  .p-degraded .dot{background:var(--warning)}
+  .p-failing{color:#a52c2c;background:var(--critical-bg)}
+  .p-failing .dot{background:var(--critical)}
+  .p-starting{color:#9b4a22;background:var(--serious-bg)}
+  .p-starting .dot{background:var(--serious)}
+  .p-unknown{color:var(--muted);background:var(--sunk)}
+  .p-unknown .dot{background:var(--muted)}
+  /* Status text needs its own step on the dark ground; the status hues
+     themselves stay fixed, only the label ink is restepped. */
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]) .p-ok{color:#7ad47a}
+    :root:not([data-theme="light"]) .p-degraded{color:#f3c96a}
+    :root:not([data-theme="light"]) .p-failing{color:#ef8a8a}
+    :root:not([data-theme="light"]) .p-starting{color:#f0a583}
+  }
+  :root[data-theme="dark"] .p-ok{color:#7ad47a}
+  :root[data-theme="dark"] .p-degraded{color:#f3c96a}
+  :root[data-theme="dark"] .p-failing{color:#ef8a8a}
+  :root[data-theme="dark"] .p-starting{color:#f0a583}
+
+  .checks{border-top:1px solid var(--rule-soft)}
+  .crow{display:grid;grid-template-columns:130px 92px 92px 1fr 150px;gap:12px;
+    align-items:center;padding:9px 16px;border-top:1px solid var(--rule-soft);font-size:12.5px}
+  .crow:first-child{border-top:none}
+  .cname{font-weight:600;display:flex;align-items:center;gap:7px}
+  .swatch{width:3px;height:14px;border-radius:2px;flex:none}
+  .cnum{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2);font-size:12px}
+  .cdetail{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap}
+  .evi{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;
+    letter-spacing:.05em;color:var(--muted)}
+  .evi.observed{color:var(--accent);font-weight:650}
+  svg.spark{display:block;width:150px;height:26px}
+
+  .grid2{display:grid;grid-template-columns:1fr 340px;gap:14px;margin-top:22px}
+  @media (max-width:900px){.grid2{grid-template-columns:1fr}
+    .crow{grid-template-columns:1fr 1fr;row-gap:4px}}
+  .panel{background:var(--surface);border:1px solid var(--rule);border-radius:6px;
+    padding:14px 16px}
+  .panel h2{margin:0 0 3px;font-size:13px;font-weight:650}
+  .panel .hint{color:var(--muted);font-size:11.5px;margin:0 0 12px}
+  .tlog{max-height:340px;overflow-y:auto;font-size:12px}
+  .tline{display:flex;gap:9px;padding:6px 0;border-top:1px solid var(--rule-soft);
+    align-items:baseline}
+  .tline:first-child{border-top:none}
+  .tt{font-family:var(--mono);color:var(--muted);font-size:11px;flex:none}
+  .empty{color:var(--muted);font-size:12px;padding:10px 0}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);
+    margin-top:10px}
+  .legend i{display:inline-block;width:9px;height:3px;border-radius:2px;
+    margin-right:5px;vertical-align:middle}
+  table.deltas{width:100%;border-collapse:collapse;font-size:12px}
+  table.deltas td{padding:5px 0;border-top:1px solid var(--rule-soft)}
+  table.deltas td:last-child{text-align:right;font-family:var(--mono);
+    font-variant-numeric:tabular-nums;color:var(--ink-2)}
+  table.deltas tr:first-child td{border-top:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Worker Health — Fleet</h1>
+      <div class="sub" id="sub">connecting…</div>
+    </div>
+    <div class="controls">
+      <button id="idle">Pause load (idle-queue test)</button>
+      <button id="normal">Resume load</button>
+      <button id="burst">Burst 2000</button>
+      <button id="theme">Theme</button>
+    </div>
+  </header>
+
+  <div id="banner">Live stream disconnected — the values below are frozen and may
+    not reflect the fleet. Reconnecting…</div>
+
+  <div class="fleetbar" id="kpis"></div>
+  <div id="workers"></div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h2>Worker → health delta</h2>
+      <p class="hint">How old the worker's own signal already was when health last
+        looked at it. A check that runs in 2&nbsp;ms while standing on a 90-second-old
+        observation is not a fresh signal — this is the number that says so.</p>
+      <div id="deltacharts"></div>
+    </div>
+    <div class="panel">
+      <h2>Status transitions</h2>
+      <p class="hint">Detection and recovery, as they happen.</p>
+      <div class="tlog" id="tlog"><div class="empty">No transitions yet.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const S = { workers:{}, history:{}, transitions:[], connected:false, lastEvent:0 };
+const CHECK_COLOR = { postgres:"var(--s1)", redis:"var(--s2)",
+                      rabbitmq:"var(--s3)", processing:"var(--s4)" };
+const el = id => document.getElementById(id);
+const esc = s => String(s??"").replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function pill(status, label){
+  const s = status || "unknown";
+  return `<span class="pill p-${esc(s)}"><span class="dot"></span>${esc(label||s)}</span>`;
+}
+function ms(v){
+  if (v === null || v === undefined) return "—";
+  return v >= 1000 ? (v/1000).toFixed(2)+" s" : v.toFixed(1)+" ms";
+}
+
+/* Sparkline: single series, 2px line, recessive baseline, emphasized endpoint.
+   Small multiples rather than one multi-series chart, so identity comes from
+   the adjacent label and never from color alone. */
+function spark(points, color, w=150, h=26){
+  const vals = points.filter(v => typeof v === "number" && isFinite(v));
+  if (vals.length < 2) return `<svg class="spark" viewBox="0 0 ${w} ${h}"></svg>`;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = (max - min) || 1, pad = 3;
+  const x = i => (i/(vals.length-1))*(w-2*pad)+pad;
+  const y = v => h-pad-((v-min)/span)*(h-2*pad);
+  const d = vals.map((v,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  const lx = x(vals.length-1).toFixed(1), ly = y(vals[vals.length-1]).toFixed(1);
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" role="img"
+      aria-label="last ${vals.length} samples, latest ${vals[vals.length-1].toFixed(1)}">
+    <line x1="0" y1="${h-1}" x2="${w}" y2="${h-1}" stroke="var(--rule-soft)" stroke-width="1"/>
+    <path d="${d}" fill="none" stroke="${color}" stroke-width="2"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lx}" cy="${ly}" r="2.5" fill="${color}"
+      stroke="var(--surface)" stroke-width="1.5"/>
+  </svg>`;
+}
+
+function renderKpis(){
+  const list = Object.values(S.workers);
+  const total = list.length;
+  const up = list.filter(w => w.reachable && (w.body||{}).status === "ok").length;
+  const bad = list.filter(w => !w.reachable ||
+    ["failing","starting"].includes((w.body||{}).status)).length;
+  const deltas = list.map(w => (w.body?.timing||{}).worker_to_health_delta_ms)
+    .filter(v => typeof v === "number");
+  const worst = deltas.length ? Math.max(...deltas) : null;
+  const depth = list.reduce((a,w) =>
+    a + ((w.body?.checks?.processing?.observed||{}).queue_depth || 0), 0);
+  const done = list.reduce((a,w) =>
+    a + ((w.body?.checks?.processing?.observed||{}).succeeded || 0), 0);
+
+  el("kpis").innerHTML = [
+    ["Workers ready", `${up}<span class="u">/${total}</span>`],
+    ["Needing attention", String(bad)],
+    ["Worst worker→health delta", worst===null?"—":ms(worst)],
+    ["Queue depth (in)", String(depth)],
+    ["Messages completed", String(done)],
+  ].map(([k,v]) =>
+    `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`
+  ).join("");
+}
+
+function renderWorkers(){
+  const names = Object.keys(S.workers).sort();
+  el("workers").innerHTML = names.map(n => {
+    const w = S.workers[n], b = w.body || {};
+    const hist = S.history[n] || [];
+    if (!w.reachable && !b.status){
+      return `<div class="worker"><div class="whead gone">
+        <span class="wname">${esc(n)}</span>
+        ${pill("failing","unreachable")}
+        <span class="wmeta">${esc(w.error||"no response")}</span></div></div>`;
+    }
+    const t = b.timing || {};
+    const checks = Object.entries(b.checks || {}).map(([cn,c]) => {
+      const color = CHECK_COLOR[cn] || "var(--muted)";
+      const series = hist.map(p => p["lat:"+cn]);
+      return `<div class="crow">
+        <div class="cname"><span class="swatch" style="background:${color}"></span>${esc(cn)}
+          ${c.critical?"":'<span class="evi">opt</span>'}</div>
+        <div>${pill(c.internal_status)}</div>
+        <div class="cnum">${c.latency_ms!==undefined?ms(c.latency_ms):"—"}</div>
+        <div class="cdetail">
+          <span class="evi ${esc(c.evidence)}">${esc(c.evidence)}</span>
+          ${c.category?" · "+esc(c.category):""}${c.detail?" · "+esc(c.detail):""}
+          ${c.observed&&c.observed.queue_depth!==undefined?" · depth "+c.observed.queue_depth:""}
+        </div>
+        <div>${spark(series, color)}</div>
+      </div>`;
+    }).join("");
+
+    return `<div class="worker">
+      <div class="whead ${esc(b.status||"unknown")}">
+        <span class="wname">${esc(n)}</span>
+        ${pill(b.status)}
+        ${b.live && b.live!=="ok" ? pill("failing","loop "+esc(b.live)) : ""}
+        <span class="spacer"></span>
+        <span class="wmeta">up ${Math.round(b.uptime_s||0)}s ·
+          ${esc((t.runner)||"—")} runner ·
+          loop lag ${ms(t.loop_lag_ms)} ·
+          Δ ${ms(t.worker_to_health_delta_ms)}</span>
+      </div>
+      <div class="checks">${checks || '<div class="crow"><div class="cdetail">no checks</div></div>'}</div>
+    </div>`;
+  }).join("") || '<div class="panel"><div class="empty">No workers reporting.</div></div>';
+}
+
+function renderDeltas(){
+  const names = Object.keys(S.workers).sort();
+  el("deltacharts").innerHTML = `<table class="deltas">` + names.map(n => {
+    const hist = (S.history[n]||[]).map(p => p.delta_ms);
+    const last = hist.filter(v=>typeof v==="number").slice(-1)[0];
+    return `<tr><td>${esc(n)}</td>
+      <td style="width:160px">${spark(hist, "var(--accent)")}</td>
+      <td>${ms(last)}</td></tr>`;
+  }).join("") + `</table>
+  <div class="legend"><span><i style="background:var(--accent)"></i>evidence age at
+    last evaluation</span></div>`;
+}
+
+function renderTransitions(){
+  const box = el("tlog");
+  if (!S.transitions.length){
+    box.innerHTML = '<div class="empty">No transitions yet.</div>'; return;
+  }
+  box.innerHTML = S.transitions.slice(0,60).map(t => `
+    <div class="tline">
+      <span class="tt">${new Date(t.t*1000).toLocaleTimeString()}</span>
+      <span><b>${esc(t.worker)}</b> ${esc(t.from)} → ${pill(t.to)}
+      ${t.categories&&t.categories.length?
+        '<span class="evi"> '+esc(t.categories.join(", "))+'</span>':""}</span>
+    </div>`).join("");
+}
+
+function renderAll(){
+  renderKpis(); renderWorkers(); renderDeltas(); renderTransitions();
+  const age = ((Date.now()/1000) - S.lastEvent);
+  el("sub").textContent = S.connected
+    ? `live · ${Object.keys(S.workers).length} workers · last update ${age<2?"just now":Math.round(age)+"s ago"}`
+    : "reconnecting…";
+}
+
+function applyEvent(ev){
+  S.lastEvent = Date.now()/1000;
+  if (ev.type === "snapshot"){
+    S.workers = {}; (ev.workers||[]).forEach(w => S.workers[w.name] = w);
+    S.history = ev.history || {};
+    S.transitions = ev.transitions || [];
+  } else if (ev.type === "worker"){
+    const w = ev.worker; S.workers[w.name] = w;
+    const h = (S.history[w.name] = S.history[w.name] || []);
+    const b = w.body || {}, t = b.timing || {};
+    const point = { t: w.at, status: b.status,
+      delta_ms: t.worker_to_health_delta_ms, loop_lag_ms: t.loop_lag_ms };
+    Object.entries(b.checks||{}).forEach(([cn,c]) => point["lat:"+cn] = c.latency_ms);
+    const proc = (b.checks||{}).processing?.observed || {};
+    point.depth = proc.queue_depth; point.succeeded = proc.succeeded;
+    h.push(point); if (h.length > 180) h.shift();
+  } else if (ev.type === "transition"){
+    S.transitions.unshift(ev.transition);
+    if (S.transitions.length > 200) S.transitions.pop();
+  }
+}
+
+let src = null, pending = false;
+function schedule(){
+  if (pending) return; pending = true;
+  requestAnimationFrame(() => { pending = false; renderAll(); });
+}
+function connect(){
+  if (src) src.close();
+  src = new EventSource("/api/stream");
+  src.onopen = () => { S.connected = true; el("banner").classList.remove("on"); schedule(); };
+  src.onmessage = e => { try { applyEvent(JSON.parse(e.data)); schedule(); } catch(_){} };
+  // A frozen dashboard showing all-green is the worst failure this component
+  // has, so a dropped stream is stated plainly rather than hidden.
+  src.onerror = () => { S.connected = false; el("banner").classList.add("on"); schedule(); };
+}
+
+async function loadgen(payload){
+  try { await fetch("/api/loadgen", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)}); }
+  catch(_){}
+}
+el("idle").onclick   = () => loadgen({rate:0});
+el("normal").onclick = () => loadgen({rate:8});
+el("burst").onclick  = () => loadgen({burst:2000});
+el("theme").onclick  = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? "dark"
+    : (matchMedia("(prefers-color-scheme: dark)").matches ? "light" : "dark");
+  document.documentElement.setAttribute("data-theme", next);
+};
+
+fetch("/api/fleet").then(r=>r.json()).then(d=>{
+  applyEvent({type:"snapshot", ...d}); schedule();
+}).catch(()=>{});
+connect();
+setInterval(schedule, 1000);
+</script>
+</body>
+</html>

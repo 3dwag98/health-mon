@@ -1,0 +1,6 @@
+[
+  {"name": "postgres",    "listen": "0.0.0.0:18432", "upstream": "postgres:5432", "enabled": true},
+  {"name": "rabbitmq",    "listen": "0.0.0.0:18672", "upstream": "rabbitmq:5672", "enabled": true},
+  {"name": "redis-cache", "listen": "0.0.0.0:18379", "upstream": "redis:6379",    "enabled": true},
+  {"name": "redis-locks", "listen": "0.0.0.0:18380", "upstream": "redis:6379",    "enabled": true}
+]
