@@ -10,3 +10,6 @@ venv/
 # Build-time CA certs are environment-specific; the directory is kept, the
 # certificates are not committed.
 docker/certs/*.crt
+
+# Local port overrides (copy from .env.example)
+.env
