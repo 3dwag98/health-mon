@@ -45,7 +45,7 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
-    ports: ["55432:5432"]
+    ports: ["${PG_HOST_PORT:-15432}:5432"]
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -61,7 +61,7 @@ services:
       timeout: 10s
       retries: 20
       start_period: 20s
-    ports: ["55672:5672", "15672:15672"]
+    ports: ["${MQ_HOST_PORT:-15673}:5672", "${MQ_MGMT_PORT:-15672}:15672"]
     # Ephemeral data dir. The demo stack keeps no broker state between runs,
     # and an anonymous volume can come back with ownership the rabbitmq user
     # cannot read (".erlang.cookie: eacces").
@@ -78,14 +78,14 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
-    ports: ["56379:6379"]
+    ports: ["${RD_HOST_PORT:-16379}:6379"]
 
   toxiproxy:
     image: ghcr.io/shopify/toxiproxy:2.11.0
     command: ["-host=0.0.0.0", "-config=/etc/toxiproxy.json"]
     volumes:
       - ./docker/toxiproxy.json:/etc/toxiproxy.json:ro
-    ports: ["8474:8474"]
+    ports: ["${TOXIPROXY_PORT:-8474}:8474"]
     depends_on:
       postgres: {condition: service_healthy}
       rabbitmq: {condition: service_healthy}
@@ -111,7 +111,7 @@ services:
       postgres:  {condition: service_healthy}
       rabbitmq:  {condition: service_healthy}
       redis:     {condition: service_healthy}
-    ports: ["8081:8080"]
+    ports: ["${BILLING_PORT:-8081}:8080"]
     restart: unless-stopped
 
   notify:
@@ -124,7 +124,7 @@ services:
       IN_QUEUE: billing.out
     depends_on:
       billing: {condition: service_started}
-    ports: ["8082:8080"]
+    ports: ["${NOTIFY_PORT:-8082}:8080"]
     restart: unless-stopped
 
   reconcile:
@@ -137,7 +137,7 @@ services:
       IN_QUEUE: billing.audit
     depends_on:
       billing: {condition: service_started}
-    ports: ["8083:8080"]
+    ports: ["${RECONCILE_PORT:-8083}:8080"]
     restart: unless-stopped
 
   loadgen:
@@ -150,7 +150,7 @@ services:
       CONTROL_PORT: "8090"
     depends_on:
       billing: {condition: service_started}
-    ports: ["8090:8090"]
+    ports: ["${LOADGEN_PORT:-8090}:8090"]
     # The load generator is not a health-reporting worker; it inherits the
     # worker image but serves only its control port, so the image's default
     # HEALTHCHECK does not apply to it.
@@ -170,7 +170,7 @@ services:
       LOADGEN_URL: "http://loadgen:8090"
     depends_on:
       billing: {condition: service_started}
-    ports: ["9000:9000"]
+    ports: ["${DASHBOARD_PORT:-9000}:9000"]
     restart: unless-stopped
 
   tests:

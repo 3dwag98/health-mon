@@ -1,0 +1,13 @@
+# Normalise line endings. Git for Windows defaults to core.autocrlf=true, which
+# would otherwise check these out with CRLF and bake CRLF into the Linux images.
+* text=auto eol=lf
+
+# Windows-native scripts keep CRLF so they open correctly in Notepad and
+# older PowerShell hosts.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.crt binary
