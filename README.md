@@ -12,83 +12,222 @@ while a worker sits on a dead pooled connection.
 ## Run it
 
 Everything runs in Docker — the SDK, the workers, the dashboard and the tests.
-The only prerequisite is a working Docker daemon.
+The only prerequisite is a working Docker daemon. On Windows that means **Docker
+Desktop with the WSL2 backend** (Settings → General → *Use the WSL 2 based
+engine*).
 
-### macOS / Linux
+Every command below is plain `docker compose` and works identically in bash,
+PowerShell and `cmd.exe`. Nothing here needs `make`, and nothing needs the
+helper scripts.
 
-    make up          # deps, three workers, load generator, dashboard
-    open http://localhost:9000
+### Start and stop
 
-    make health      # aggregate status of every worker
-    make idle        # pause load — a quiet queue must NOT alert
-    make burst       # 2000 messages — watch backlog and recovery
-    make chaos-db-blackhole ; make restore
-    make down
+```
+docker compose build
+docker compose up -d
+```
 
-### Windows
+Then open **http://localhost:9000** for the dashboard.
 
-Requires **Docker Desktop with the WSL2 backend** (Settings → General → *Use the
-WSL 2 based engine*). No `make`, no bash, no curl needed — `run.ps1` covers every
-target the Makefile does.
+```
+docker compose ps                                  # container status
+docker compose logs -f billing notify reconcile    # tail the workers
+docker compose down -v --remove-orphans            # stop, remove volumes
+```
 
-From PowerShell, in the repo root:
+First start pulls four images and builds two, so give it a couple of minutes.
+The workers report `starting` until their dependencies are reachable — that is
+the boot grace working, not a failure.
 
-    .\run.ps1 up          # builds, starts everything, opens the dashboard
-    .\run.ps1 health      # aggregate status of every worker
-    .\run.ps1 idle        # pause load — a quiet queue must NOT alert
-    .\run.ps1 burst       # 2000 messages — watch backlog and recovery
-    .\run.ps1 chaos-db-blackhole
-    .\run.ps1 restore
-    .\run.ps1 down
+### Look at the health
 
-    .\run.ps1             # no argument prints every command
+```
+curl http://localhost:8081/health     # billing
+curl http://localhost:8082/health     # notify
+curl http://localhost:8083/health     # reconcile
+curl http://localhost:8081/metrics    # prometheus exposition
+curl http://localhost:8081/ready      # 200 or 503, the readiness verdict
+curl http://localhost:8081/live       # loop responsiveness only
+```
 
-From `cmd.exe`, drop the `.\` and the extension — `run up`, `run health`, and so
-on. `run.cmd` wraps the PowerShell call and bypasses the execution policy for
-that one invocation without changing any machine setting.
+**In PowerShell, write `curl.exe`, not `curl`** — `curl` is an alias for
+`Invoke-WebRequest` there and takes different arguments. `curl.exe` ships with
+Windows 10 1803 and later.
 
-If PowerShell refuses to run the script directly (`running scripts is disabled on
-this system`), either use `run.cmd`, or allow local scripts for your user once:
+Or ask a container, which avoids the host entirely:
 
-    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+docker compose exec billing worker-health --url http://127.0.0.1:8080 --json
+```
 
-**Port conflicts.** Windows reserves blocks of high ports for Hyper-V and WSL2.
-If `up` fails with *"bind: An attempt was made to access a socket in a way
-forbidden by its access permissions"*, that port is reserved. Check what is
-reserved in an elevated prompt:
-
-    netsh interface ipv4 show excludedportrange protocol=tcp
-
-Then copy `.env.example` to `.env` and change the offending number. Every host
-port is configurable there; the containers talk to each other over the compose
-network and are unaffected.
-
-**Line endings.** `.gitattributes` forces LF on everything that goes into an
-image, so Git for Windows' default `core.autocrlf=true` cannot bake CRLF into
-the Linux containers. If you cloned before that file existed, re-normalise once
-with `git rm --cached -r . && git reset --hard`.
+That is the package's own CLI probe. It exits 0 when ready and 1 when not, so it
+also works as a shell check or a PM2 healthcheck.
 
 ### Fault injection
 
 Run any of these while watching the dashboard — detection and recovery appear in
-the transition log.
+the transition log within a few seconds.
 
-| Make | PowerShell | What it does |
-|---|---|---|
-| `make chaos-db-blackhole` | `.\run.ps1 chaos-db-blackhole` | Packets dropped, socket never closes. The firewall-DROP case, and the hard one. |
-| `make chaos-db-down` | `.\run.ps1 chaos-db-down` | Port closed → `connection_refused`. |
-| `make chaos-db-slow` | `.\run.ps1 chaos-db-slow` | +400 ms, below the timeout → must stay OK. |
-| `make chaos-redis-down` | `.\run.ps1 chaos-redis-down` | Non-critical dependency: degrades, does not 503 readiness. |
-| `make chaos-mq-down` | `.\run.ps1 chaos-mq-down` | Broker unreachable. |
-| `make restore` | `.\run.ps1 restore` | Clear every fault. |
+These drive `toxiproxy-cli` **inside** the toxiproxy container, so there is no
+JSON quoting to get wrong and the commands are identical in every shell.
+
+```
+# port closed -> connection_refused
+docker compose exec toxiproxy /toxiproxy-cli toggle postgres
+
+# black hole: packets dropped, socket never closes (the firewall-DROP case,
+# and the one that actually breaks health checks)
+docker compose exec toxiproxy /toxiproxy-cli toxic add postgres -t timeout -a timeout=0 -n blackhole
+
+# 400ms latency, below the check timeout -> must stay OK
+docker compose exec toxiproxy /toxiproxy-cli toxic add postgres -t latency -a latency=400 -a jitter=0 -n slow
+
+# non-critical dependency: degrades, must NOT 503 readiness
+docker compose exec toxiproxy /toxiproxy-cli toggle redis-cache
+
+# broker unreachable
+docker compose exec toxiproxy /toxiproxy-cli toggle rabbitmq
+
+# inspect what is currently injected
+docker compose exec toxiproxy /toxiproxy-cli list
+docker compose exec toxiproxy /toxiproxy-cli inspect postgres
+```
+
+Clearing a fault:
+
+```
+# remove one toxic by the name given when it was added
+docker compose exec toxiproxy /toxiproxy-cli toxic remove postgres -n blackhole
+
+# toggle flips, so running it again re-enables the proxy
+docker compose exec toxiproxy /toxiproxy-cli toggle postgres
+```
+
+To clear **everything** at once — every toxic removed and every proxy re-enabled
+— call the reset endpoint:
+
+```
+curl -X POST http://localhost:8474/reset
+```
+
+PowerShell equivalent:
+
+```
+Invoke-RestMethod -Uri http://localhost:8474/reset -Method POST
+```
+
+### Load control
+
+The load generator publishes to `billing.in` and takes a JSON body on port 8090.
+Rate 0 pauses it, which is how you produce a genuinely idle queue — the case
+that must never alert.
+
+bash / `cmd.exe`:
+
+```
+curl -X POST http://localhost:8090/ -H "Content-Type: application/json" -d "{\"rate\":0}"
+curl -X POST http://localhost:8090/ -H "Content-Type: application/json" -d "{\"rate\":8}"
+curl -X POST http://localhost:8090/ -H "Content-Type: application/json" -d "{\"burst\":2000}"
+curl http://localhost:8090/
+```
+
+PowerShell — use `Invoke-RestMethod`, which avoids the quoting entirely:
+
+```
+Invoke-RestMethod -Uri http://localhost:8090/ -Method POST -ContentType application/json -Body '{"rate":0}'
+Invoke-RestMethod -Uri http://localhost:8090/ -Method POST -ContentType application/json -Body '{"rate":8}'
+Invoke-RestMethod -Uri http://localhost:8090/ -Method POST -ContentType application/json -Body '{"burst":2000}'
+```
+
+### A demo worth running
+
+```
+docker compose up -d
+                                       # wait for 3/3 on the dashboard
+
+# 1. the false-positive test: a quiet queue must stay OK, forever
+curl -X POST http://localhost:8090/ -H "Content-Type: application/json" -d "{\"rate\":0}"
+                                       # watch for a minute: still ok
+
+# 2. the hard fault: socket open, nothing comes back
+curl -X POST http://localhost:8090/ -H "Content-Type: application/json" -d "{\"rate\":8}"
+docker compose exec toxiproxy /toxiproxy-cli toxic add postgres -t timeout -a timeout=0 -n blackhole
+                                       # evidence flips observed -> probed,
+                                       # then postgres -> failing (timeout)
+
+# 3. recovery
+curl -X POST http://localhost:8474/reset
+                                       # back to ok, evidence back to observed
+
+# 4. criticality: redis is non-critical, so this degrades but does not fail
+docker compose exec toxiproxy /toxiproxy-cli toggle redis-cache
+curl -i http://localhost:8081/ready    # still HTTP 200
+docker compose exec toxiproxy /toxiproxy-cli toggle redis-cache
+```
 
 ### Tests
 
-    make test        /  .\run.ps1 test     # full suite, in a container
-    make unit        /  .\run.ps1 unit     # unit tier, native Python, no Docker
+```
+docker compose --profile test run --rm tests pytest -q tests
+```
 
-The unit tier starts no containers and passes with the Docker daemon stopped —
-that boundary is enforced, not just intended.
+Unit tier only — no containers, and it passes with the Docker daemon stopped.
+That boundary is enforced by a test, not just intended:
+
+```
+docker compose --profile test run --rm tests pytest -q tests/unit
+```
+
+Natively, if you have Python 3.11+ and would rather not use Docker:
+
+```
+pip install -e ".[dev]"
+pytest tests/unit -q
+```
+
+### Port conflicts
+
+Every host port is configurable. Copy `.env.example` to `.env` and change what
+collides; the containers reach each other over the compose network and are
+unaffected by these values.
+
+On Windows, Hyper-V and WSL2 reserve blocks of high ports. If `up` fails with
+*"bind: An attempt was made to access a socket in a way forbidden by its access
+permissions"*, the port is reserved rather than in use. Check which ranges are
+taken from an elevated prompt:
+
+```
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+### Line endings on Windows
+
+`.gitattributes` forces LF on everything that goes into an image, so Git for
+Windows' default `core.autocrlf=true` cannot bake CRLF into the Linux
+containers. If you cloned before that file existed, re-normalise once:
+
+```
+git rm --cached -r .
+git reset --hard
+```
+
+### Optional shortcuts
+
+`make` on macOS and Linux, `.\run.ps1` on Windows, wrap everything above. They
+are conveniences — the `docker compose` commands are the real interface, and
+every target maps onto one of them.
+
+```
+make up          |  .\run.ps1 up
+make health      |  .\run.ps1 health
+make idle        |  .\run.ps1 idle
+make restore     |  .\run.ps1 restore
+make down        |  .\run.ps1 down
+```
+
+`make help` and `.\run.ps1` with no argument list the rest. From `cmd.exe`, use
+`run up` — `run.cmd` wraps the PowerShell call and bypasses the execution policy
+for that one invocation without changing any machine setting.
 
 ## What it checks
 
