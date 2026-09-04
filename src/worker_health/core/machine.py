@@ -17,17 +17,36 @@ from .model import CheckResult, Status
 class CheckSpec:
     name: str
     critical: bool = True
+    # A registered-but-switched-off check.  It stays in the snapshot as
+    # `disabled` rather than vanishing, because a check that silently
+    # disappeared is indistinguishable from one that was never wired up.
+    enabled: bool = True
     interval: float = 10.0
     timeout: float = 3.0
     ttl: float = 30.0
     failure_threshold: int = 3
     success_threshold: int = 2
     breaker_threshold: int = 5
-    max_backoff: float = 120.0
     jitter: float = 0.2
     # How long a check may rely on passively observed evidence before it
     # falls back to a synthetic probe.
     max_silence: float = 30.0
+
+    # Backoff while failing.  A dependency that is down does not need to be
+    # asked sixty times a minute: that is the retry storm the guardrails
+    # forbid, and it lands on a service that is already in trouble.  The
+    # sequence is 5s, 10s, 20s, 40s, 60s, 60s ... with 10% jitter.
+    backoff_initial: float = 5.0
+    backoff_max: float = 60.0
+    backoff_multiplier: float = 2.0
+    backoff_jitter: float = 0.1
+    # Back-compatible alias for backoff_max.
+    max_backoff: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_backoff is not None:
+            self.backoff_max = self.max_backoff
+        self.max_backoff = self.backoff_max
 
 
 @dataclass(slots=True)
@@ -68,6 +87,24 @@ class StateMachine:
 
     def spec(self, name: str) -> CheckSpec:
         return self._specs[name]
+
+    def enabled_specs(self):
+        return tuple(s for s in self._specs.values() if s.enabled)
+
+    def set_enabled(self, name: str, enabled: bool) -> None:
+        """Turn a check off without unregistering it.
+
+        Used by configuration (`enabled: false`) and by an operator who
+        needs to silence one noisy dependency without restarting the worker.
+        """
+        self._specs[name].enabled = enabled
+        st = self._states[name]
+        if enabled:
+            # Re-arm immediately: a check switched back on should not wait
+            # out the backoff it accumulated before it was disabled.
+            st.backoff_step = 0
+            st.consecutive_fail = 0
+            st.next_due = self._clock.monotonic()
 
     # -- transitions ---------------------------------------------------- #
 
@@ -114,23 +151,41 @@ class StateMachine:
             st.transitions += 1
             st.entered_at = result.checked_at
 
-        # The breaker changes probe FREQUENCY, never reported status.  One
-        # that reported UNKNOWN while open would hide the outage it exists
-        # to survive.
-        if st.consecutive_fail >= spec.breaker_threshold:
+        # Backoff changes probe FREQUENCY, never reported status.  A breaker
+        # that reported UNKNOWN while open would hide the outage it exists to
+        # survive.  It engages as soon as the check is confirmed failing --
+        # that is the point at which continuing to hammer the dependency
+        # every `interval` seconds is pure added load with no new information.
+        if st.consecutive_fail >= spec.failure_threshold:
             st.backoff_step = min(st.backoff_step + 1, 12)
 
         st.next_due = self._schedule(spec, st)
 
     def _schedule(self, spec: CheckSpec, st: CheckState) -> float:
-        base = spec.interval
         if st.backoff_step:
-            base = min(spec.interval * (2 ** st.backoff_step), spec.max_backoff)
-        # Not an optimisation.  Forty workers started by one command have
-        # their ticks aligned to within milliseconds; un-jittered, every
-        # dependency sees a synchronised burst forever.
-        factor = 1.0 + self._rng.uniform(-spec.jitter, spec.jitter)
+            base = min(
+                spec.backoff_initial * (spec.backoff_multiplier ** (st.backoff_step - 1)),
+                spec.backoff_max,
+            )
+            spread = spec.backoff_jitter
+        else:
+            base = spec.interval
+            # Not an optimisation.  Forty workers started by one command have
+            # their ticks aligned to within milliseconds; un-jittered, every
+            # dependency sees a synchronised burst forever.
+            spread = spec.jitter
+        factor = 1.0 + self._rng.uniform(-spread, spread)
         return self._clock.monotonic() + base * factor
+
+    def next_interval(self, name: str) -> float:
+        """The interval this check would wait right now, backoff included."""
+        spec, st = self._specs[name], self._states[name]
+        if not st.backoff_step:
+            return spec.interval
+        return min(
+            spec.backoff_initial * (spec.backoff_multiplier ** (st.backoff_step - 1)),
+            spec.backoff_max,
+        )
 
     def mark_unknown(self, name: str) -> None:
         spec, st = self._specs[name], self._states[name]
@@ -151,6 +206,8 @@ class StateMachine:
         results, so every check ages into UNKNOWN on its own.
         """
         spec, st = self._specs[name], self._states[name]
+        if not spec.enabled:
+            return Status.DISABLED
         if st.last_result is None:
             return Status.UNKNOWN
         if self._clock.monotonic() - st.last_result.checked_at > spec.ttl:
@@ -158,7 +215,12 @@ class StateMachine:
         return st.effective
 
     def due(self, name: str) -> bool:
+        if not self._specs[name].enabled:
+            return False
         return self._clock.monotonic() >= self._states[name].next_due
+
+    def breaker_open(self, name: str) -> bool:
+        return self._states[name].consecutive_fail >= self._specs[name].breaker_threshold
 
     def state(self, name: str) -> CheckState:
         return self._states[name]

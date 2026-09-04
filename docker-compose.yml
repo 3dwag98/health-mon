@@ -48,14 +48,15 @@ services:
     ports: ["${PG_HOST_PORT:-15432}:5432"]
 
   rabbitmq:
-    image: rabbitmq:3.13-management-alpine
+    image: rabbitmq:3.10-management-alpine
     environment:
       RABBITMQ_DEFAULT_USER: app
       RABBITMQ_DEFAULT_PASS: canary-mq-4b7ce02d
     healthcheck:
-      # The modern focused check. /api/aliveness-test is deliberately NOT
-      # used: on 3.13 it declares a queue, publishes and consumes, which
-      # would violate the non-destructive rule this project is built on.
+      # The focused diagnostics, both present since 3.8. /api/aliveness-test
+      # is deliberately NOT used: on 3.10 it declares a queue, publishes and
+      # consumes a message, which would violate the non-destructive rule
+      # this project is built on. It became a no-op only in 4.0.
       test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_local_alarms"]
       interval: 5s
       timeout: 10s
@@ -69,10 +70,15 @@ services:
       - /var/lib/rabbitmq
 
   redis:
-    # Pinned to the version in the target environment. Old enough that
-    # modern clients must be told to speak RESP2 -- see build_client().
-    image: redis:5.0.6-alpine
-    command: redis-server --requirepass canary-rd-1a9fe63b --maxmemory-policy allkeys-lru
+    # Pinned to the version in the target environment. 7.2 implements HELLO,
+    # so RESP2/RESP3 negotiation is a non-issue and build_client() leaves the
+    # protocol at the client default -- see checks/redis_.py.
+    image: redis:7.2-alpine
+    # maxmemory is set deliberately: without it, memory_ratio has no
+    # denominator and the memory-pressure path can never be demonstrated.
+    command: >
+      redis-server --requirepass canary-rd-1a9fe63b
+      --maxmemory 256mb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD-SHELL", "redis-cli -a canary-rd-1a9fe63b ping | grep -q PONG"]
       interval: 3s

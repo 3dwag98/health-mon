@@ -23,6 +23,32 @@ class Status(Enum):
     FAILING = "failing"
     UNKNOWN = "unknown"
     STARTING = "starting"
+    # Registered but switched off by configuration.  Kept in the snapshot so
+    # an operator can see the check exists and is not merely missing, and
+    # excluded from every aggregate.
+    DISABLED = "disabled"
+
+
+class Readiness(str, Enum):
+    """The answer /ready gives, in the vocabulary operators use.
+
+    Separate from ``Status`` on purpose.  ``Status`` describes ONE
+    dependency; this describes the WORKER, and the two are not the same
+    sentence -- a failing non-critical dependency is ``failing`` as a status
+    and ``degraded`` as a readiness.
+    """
+
+    READY = "ready"
+    DEGRADED = "degraded"
+    UNREADY = "unready"
+    STARTING = "starting"
+
+
+class Liveness(str, Enum):
+    """The answer /live gives.  Two values, because it asks one question."""
+
+    ALIVE = "alive"
+    UNALIVE = "unalive"
 
 
 class Evidence(str, Enum):
@@ -43,6 +69,7 @@ class Evidence(str, Enum):
 # is less severe than a confirmed failure: treating it as worse produces a
 # false outage on every deploy and every slow check.
 SEVERITY: Mapping[Status, int] = {
+    Status.DISABLED: 0,
     Status.OK: 0,
     Status.STARTING: 1,
     Status.DEGRADED: 2,
@@ -55,6 +82,7 @@ SEVERITY: Mapping[Status, int] = {
 # standard we claim conformance to.
 WIRE: Mapping[Status, str] = {
     Status.OK: "pass",
+    Status.DISABLED: "pass",
     Status.STARTING: "warn",
     Status.DEGRADED: "warn",
     Status.UNKNOWN: "warn",
@@ -65,8 +93,14 @@ WIRE: Mapping[Status, str] = {
 # for STARTING kills every worker mid-boot; one that returns 503 for FAILING
 # restarts the whole fleet when a shared database goes down.  Liveness answers
 # exactly one question: is this process's loop responsive.
+#
+# LIVE_CODE is the projection of a DEPENDENCY status onto /live, and every
+# entry is 200 by design: no dependency verdict, of any severity, may ever
+# make a process look dead.  The liveness verdict itself is projected through
+# LIVENESS_CODE below, where a wedged loop does return 503.
 LIVE_CODE: Mapping[Status, int] = {
     Status.OK: 200,
+    Status.DISABLED: 200,
     Status.STARTING: 200,
     Status.DEGRADED: 200,
     Status.UNKNOWN: 200,
@@ -75,10 +109,39 @@ LIVE_CODE: Mapping[Status, int] = {
 
 READY_CODE: Mapping[Status, int] = {
     Status.OK: 200,
+    Status.DISABLED: 200,
     Status.DEGRADED: 200,
     Status.UNKNOWN: 200,
     Status.STARTING: 503,
     Status.FAILING: 503,
+}
+
+
+# The projection from the aggregate dependency status onto the worker-level
+# vocabulary.  One place, so /ready, /health, the metrics and the dashboard
+# cannot disagree about what "degraded" means.
+READINESS_FROM_STATUS: Mapping[Status, "Readiness"] = {
+    Status.OK: Readiness.READY,
+    Status.DISABLED: Readiness.READY,
+    Status.STARTING: Readiness.STARTING,
+    Status.DEGRADED: Readiness.DEGRADED,
+    Status.UNKNOWN: Readiness.DEGRADED,
+    Status.FAILING: Readiness.UNREADY,
+}
+
+READINESS_CODE: Mapping["Readiness", int] = {
+    Readiness.READY: 200,
+    # Degraded is still serving.  Returning 503 here would pull a worker out
+    # of rotation for a non-critical cache, which is how a cache outage
+    # becomes a total outage.
+    Readiness.DEGRADED: 200,
+    Readiness.STARTING: 503,
+    Readiness.UNREADY: 503,
+}
+
+LIVENESS_CODE: Mapping["Liveness", int] = {
+    Liveness.ALIVE: 200,
+    Liveness.UNALIVE: 503,
 }
 
 
@@ -166,14 +229,32 @@ class Snapshot:
     version: str
     uptime_s: float
     timing: Mapping[str, float | int] = field(default_factory=dict)
+    # Why readiness is what it is, in the operator's words.  Populated by
+    # aggregate.readiness(); empty when the worker is plainly ready.
+    reasons: tuple[str, ...] = ()
+    processing: Mapping[str, Mapping[str, float | int | str | None]] = field(
+        default_factory=dict
+    )
 
     def check(self, name: str) -> CheckResult:
         return self.results[name]
 
     @property
+    def liveness(self) -> Liveness:
+        return Liveness.ALIVE if self.live_status is Status.OK else Liveness.UNALIVE
+
+    @property
+    def readiness(self) -> Readiness:
+        # A process whose loop is not turning cannot process work, whatever
+        # its dependencies say.
+        if self.liveness is Liveness.UNALIVE:
+            return Readiness.UNREADY
+        return READINESS_FROM_STATUS[self.status]
+
+    @property
     def ready_code(self) -> int:
-        return READY_CODE[self.status]
+        return READINESS_CODE[self.readiness]
 
     @property
     def live_code(self) -> int:
-        return LIVE_CODE[self.live_status]
+        return LIVENESS_CODE[self.liveness]

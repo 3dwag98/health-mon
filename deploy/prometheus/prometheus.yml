@@ -1,0 +1,30 @@
+# Scrape config for a worker fleet.
+#
+# Workers expose /metrics on their health port. The port is NOT public: it
+# carries no authentication, so it belongs on a private network or bound to
+# loopback with the scraper on the same host.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: worker-health
+    metrics_path: /metrics
+    # A scrape must never be the reason a worker looks slow: every endpoint
+    # serves a cached snapshot and does no I/O, so this is generous.
+    scrape_timeout: 5s
+    static_configs:
+      - targets:
+          - billing-worker:8080
+          - notify-worker:8080
+          - reconcile-worker:8080
+    relabel_configs:
+      # `service` and `instance` are already labels on every metric the SDK
+      # emits; keep Prometheus's own target labels out of the way so they
+      # do not shadow them.
+      - source_labels: [__address__]
+        target_label: scrape_target

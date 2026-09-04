@@ -120,6 +120,16 @@ def check_evidence_age(name: str) -> str:
     return f"check.{name}.evidence_age_ms"
 
 
+def dependency_duration(name: str) -> str:
+    """Wall time a REAL dependency call took, from auto-instrumentation.
+
+    Distinct from ``check_duration``: that one times the health check, this
+    one times the worker's own query.  When they diverge, the difference is
+    usually the application's connection pool.
+    """
+    return f"dependency.{name}.duration_ms"
+
+
 def handler_duration(queue: str) -> str:
     """Wall time the worker's own handler consumed."""
     return f"worker.{queue}.handler_ms"
@@ -139,3 +149,7 @@ def detection_latency(name: str) -> str:
 WORKER_HEALTH_DELTA = "delta.worker_to_health_ms"
 LOOP_LAG = "runtime.loop_lag_ms"
 SNAPSHOT_BUILD = "runtime.snapshot_build_ms"
+# How late the runner's own tick was.  Separate from LOOP_LAG: this one is
+# measured against the tick the runner intended, so it isolates scheduler
+# starvation from a blocked event loop.
+RUNNER_TICK_DELAY = "runtime.runner_tick_delay_ms"

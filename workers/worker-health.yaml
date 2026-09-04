@@ -1,0 +1,99 @@
+# worker-health configuration for the sample fleet.
+#
+# One file serves all three workers: what differs between them (service
+# name, queue, thresholds) comes from the environment through ${VAR}
+# substitution, while the probe SHAPE stays here in version control where
+# it can be reviewed.
+#
+# `@name` values are references into the runtime context passed to
+# setup_worker_health() -- the live engine, client and broker state.  No
+# credential ever appears in this file; the DSN is built in code from the
+# environment and the probes are handed the objects, not the strings.
+
+worker_health:
+  service: ${SERVICE:-worker}
+  instance: ${HEALTH_INSTANCE:-}
+  version: 0.2.0
+
+  health_host: 0.0.0.0          # container: the port is published deliberately
+  health_port: ${HEALTH_PORT:-8080}
+
+  runner: thread                # a blocking pika consume loop
+  tick: 0.2
+  boot_grace: ${BOOT_GRACE:-25}
+  log_level: ${LOG_LEVEL:-INFO}
+
+  default_queue: ${IN_QUEUE:-billing.in}
+
+  # The processing check is registered automatically from these; it is the
+  # one that distinguishes an idle queue from a stuck consumer.
+  processing_check: true
+  max_idle: ${MAX_IDLE:-45}
+  max_since_success: ${MAX_SINCE_SUCCESS:-90}
+  poison_threshold: 10
+
+  probes:
+    # Critical. The engine reference is what makes pool exhaustion visible:
+    # a probe on its own connection can never see that the APPLICATION has
+    # run out of slots, which is a different finding from a database being
+    # down and goes to a different team.
+    - type: postgres
+      name: postgres
+      critical: true
+      interval: 3
+      timeout: 2
+      failure_threshold: 2
+      success_threshold: 2
+      max_silence: 6
+      params:
+        engine: "@db_engine"
+        probe_dsn: "@probe_dsn"
+
+    # Non-critical on purpose: this worker uses Redis for idempotency and
+    # caching, and can process messages without it. A failure here degrades
+    # the worker; it must not take it out of rotation.
+    - type: redis
+      name: redis
+      critical: false
+      interval: 3
+      timeout: 2
+      failure_threshold: 2
+      success_threshold: 2
+      max_silence: 6
+      params:
+        client: "@redis_client"
+
+    # Entirely introspective: it reads the state of the worker's OWN
+    # connection, updated from that connection's thread. No probe, no second
+    # connection, and a wedged worker shows up as stale state.
+    - type: rabbitmq
+      name: rabbitmq
+      critical: true
+      interval: 2
+      timeout: 2
+      failure_threshold: 2
+      success_threshold: 2
+      params:
+        broker_state: "@broker_state"
+        queue: ${IN_QUEUE:-billing.in}
+        backlog_threshold: ${BACKLOG_THRESHOLD:-500}
+        stale_after: 12
+
+    # Local resource. Non-critical: a worker low on disk is worth an alert,
+    # not a removal from rotation.
+    - type: disk
+      name: worker-disk
+      critical: false
+      interval: 60
+      timeout: 2
+      params:
+        path: /
+        min_free_gb: 1
+
+  # Controlled restart. Off by default; the policy only ever exits this
+  # process and lets the supervisor apply its own restart rules.
+  restart:
+    enabled: ${RESTART_ENABLED:-false}
+    after_cycles: ${RESTART_AFTER_CYCLES:-5}
+    min_uptime: ${RESTART_MIN_UPTIME:-120}
+    max_per_hour: 3

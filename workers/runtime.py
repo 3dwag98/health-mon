@@ -1,33 +1,33 @@
-"""Shared wiring: build a monitor with all four checks and serve it.
+"""Shared wiring for the sample workers.
 
-This is what the integration guide reduces to -- about forty lines to give
-any worker full dependency, processing and liveness reporting.
+This is the whole integration, and it is worth reading as the reference for
+what a real worker has to do:
+
+    build the clients it was going to build anyway
+    hand them to setup_worker_health() as a context
+    decorate the handler
+
+Everything else -- instrumenting SQLAlchemy, redis-py and pika, installing
+the probes named in the YAML, starting the health server, registering the
+processing check -- happens inside that one call.  The worker files
+themselves contain no health code beyond a decorator.
 """
 from __future__ import annotations
 
-import logging
 import os
 
 import pika
 from sqlalchemy import create_engine
 
-from worker_health import (
-    BrokerState,
-    HealthMonitor,
-    HealthServer,
-    PostgresCheck,
-    ProcessingCheck,
-    ProcessingState,
-    RabbitMQCheck,
-    RedisCheck,
-    RestartPolicy,
-    Tracker,
-    build_client,
-    install_broker_probe,
-)
-from worker_health.telemetry.logs import configure, log_transition
+from worker_health import BrokerState, build_client, install_broker_probe, setup_worker_health
+from worker_health.instrument import instrument_pika_channel
 
 import settings as S
+
+CONFIG_PATH = os.getenv(
+    "WORKER_HEALTH_CONFIG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker-health.yaml"),
+)
 
 
 def build_engine(pool_size: int = 5):
@@ -48,9 +48,11 @@ def build_engine(pool_size: int = 5):
 
 
 def build_redis(db: int = 0):
-    # protocol=2 is mandatory against Redis 5.0.6 -- redis-py 6+ negotiates
-    # RESP3 with HELLO, which 5.0.6 does not implement, and every command
-    # then fails.  build_client() pins it.
+    """Redis 7.2: protocol negotiation is a non-issue, timeouts are not.
+
+    build_client() sets socket timeouts because redis-py's default of None
+    means a black-holed connection hangs the probe forever.
+    """
     return build_client(
         host=S.RD_HOST, port=S.RD_PORT, db=db, password=S.RD_PASSWORD,
         socket_timeout=1.5, socket_connect_timeout=1.5,
@@ -72,76 +74,71 @@ def build_amqp():
 
 def build(service: str, *, runner: str = "thread", queue: str | None = None,
           pool_size: int = 5, engine=None, redis=None, connection=None,
-          extra_checks=(), broker_critical: bool = True):
-    logger = configure(S.LOG_LEVEL)
-    queue = queue or S.IN_QUEUE
-    instance = S.INSTANCE or f"{service}-{os.getpid()}"
+          probes=(), **overrides):
+    """Build the clients, then hand them to the SDK.
 
-    monitor = HealthMonitor(
-        service=service, version="0.1.0", instance=instance,
-        runner=runner, tick=0.2, logger=logger,
-    )
-    monitor.on_transition(log_transition(logger, service, instance))
+    Returns the same dict shape the workers used before, so nothing in a
+    worker file has to know that the wiring moved.
+    """
+    queue = queue or S.IN_QUEUE
 
     engine = engine if engine is not None else build_engine(pool_size)
     redis = redis if redis is not None else build_redis()
     connection = connection if connection is not None else build_amqp()
 
-    processing = ProcessingState()
     broker = BrokerState()
     broker.update(prefetch=S.PREFETCH)
-    tracker = Tracker(monitor, processing, default_queue=queue)
 
-    monitor.register(
-        PostgresCheck(app_engine=engine, probe_dsn=S.pg_url(), name="postgres"),
-        name="postgres", critical=True,
-        interval=3.0, timeout=2.0, ttl=15.0, max_silence=6.0,
-        failure_threshold=2, success_threshold=2,
+    health = setup_worker_health(
+        service=service,
+        config_path=CONFIG_PATH,
+        context={
+            # Auto-instrumentation finds these by shape and records every
+            # real query, command and broker event as OBSERVED evidence.
+            "db_engine": engine,
+            "redis_client": redis,
+            "amqp_connection": connection,
+            # Referenced by "@name" from the YAML.
+            "broker_state": broker,
+            "probe_dsn": S.pg_url(),
+        },
+        probes=list(probes),
+        runner=runner,
+        default_queue=queue,
+        **overrides,
     )
-    monitor.register(
-        RedisCheck(redis, name="redis"),
-        name="redis", critical=False,
-        interval=3.0, timeout=2.0, ttl=15.0, max_silence=6.0,
-        failure_threshold=2, success_threshold=2,
-    )
-    monitor.register(
-        RabbitMQCheck(broker, queue=queue, name="rabbitmq",
-                      backlog_threshold=int(os.getenv("BACKLOG_THRESHOLD", "500")),
-                      stale_after=12.0),
-        name="rabbitmq", critical=broker_critical,
-        interval=2.0, timeout=2.0, ttl=20.0,
-        failure_threshold=2, success_threshold=2,
-    )
-    monitor.register(
-        ProcessingCheck(processing, broker_state=broker,
-                        max_idle=float(os.getenv("MAX_IDLE", "45")),
-                        max_since_success=float(os.getenv("MAX_SINCE_SUCCESS", "90"))),
-        name="processing", critical=False,
-        interval=2.0, timeout=2.0, ttl=20.0,
-        failure_threshold=2, success_threshold=1,
-    )
-    for check, kwargs in extra_checks:
-        monitor.register(check, **kwargs)
 
-    if S.RESTART_ENABLED:
-        monitor.set_restart_policy(RestartPolicy(
-            enabled=True,
-            after_cycles=S.RESTART_AFTER_CYCLES,
-            min_uptime=S.RESTART_MIN_UPTIME,
-            logger=logger,
-        ))
+    # The passive declare that yields queue depth and consumer count, driven
+    # from the connection's OWN thread via call_later.  No second connection,
+    # no cross-thread access to a BlockingConnection, and if the worker's
+    # loop stops turning the state goes stale -- which is itself the signal.
+    install_broker_probe(connection, broker, queue, interval=2.0,
+                         logger=health.logger)
 
-    install_broker_probe(connection, broker, queue, interval=2.0, logger=logger)
-
-    server = HealthServer(monitor, port=S.HEALTH_PORT).start()
-    monitor.start(boot_grace=float(os.getenv("BOOT_GRACE", "20")))
-
-    logger.info("worker health started", extra={
-        "service": service, "instance": instance, "queue": queue,
+    health.logger.info("worker health started", extra={
+        "service": service, "instance": health.monitor.instance, "queue": queue,
     })
     return {
-        "monitor": monitor, "server": server, "logger": logger,
+        "health": health,
+        "monitor": health.monitor, "server": health.server, "logger": health.logger,
         "engine": engine, "redis": redis, "connection": connection,
-        "processing": processing, "broker": broker, "tracker": tracker,
-        "queue": queue, "instance": instance,
+        "processing": health.processing, "broker": broker,
+        "tracker": health.tracker, "queue": queue,
+        "instance": health.monitor.instance,
     }
+
+
+def consume_channel(ctx: dict, queue: str, *, prefetch: int | None = None):
+    """Open the consumer channel with delivery/ack tracking already attached.
+
+    ``instrument_pika_channel`` is what removes the hand-written
+    ``broker.update(last_delivery_at=...)`` and the unacked counter from
+    every consume callback -- and with them the classic bug where one path
+    through the callback forgets to decrement and the worker eventually
+    reports credit exhaustion while perfectly healthy.
+    """
+    channel = ctx["connection"].channel()
+    instrument_pika_channel(channel, ctx["monitor"], ctx["broker"])
+    channel.queue_declare(queue=queue, durable=True)
+    channel.basic_qos(prefetch_count=prefetch if prefetch is not None else S.PREFETCH)
+    return channel

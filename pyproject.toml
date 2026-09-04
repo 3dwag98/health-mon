@@ -4,25 +4,43 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "worker-health"
-version = "0.1.0"
+version = "0.2.0"
 description = "Operational health for message-driven Python workers: dependency, processing and liveness signals derived from the worker's own connections."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+# No required dependencies. A health SDK that cannot start because a parser
+# is missing is a poor advertisement for itself, so YAML has a built-in
+# subset loader and every driver is imported lazily by the adapter that
+# needs it.
 dependencies = []
 
 [project.optional-dependencies]
 postgres = ["sqlalchemy>=2.0", "psycopg[binary]>=3.1"]
 rabbitmq = ["pika>=1.3"]
-redis = ["redis>=4.6"]
-all = ["sqlalchemy>=2.0", "psycopg[binary]>=3.1", "pika>=1.3", "redis>=4.6"]
+redis = ["redis>=5.0"]
+yaml = ["pyyaml>=6.0"]
+django = ["django>=4.2"]
+fastapi = ["fastapi>=0.110", "pydantic-settings>=2.0"]
+all = [
+  "sqlalchemy>=2.0", "psycopg[binary]>=3.1", "pika>=1.3", "redis>=5.0",
+  "pyyaml>=6.0",
+]
 dev = [
   "pytest>=8", "pytest-timeout", "httpx",
-  "sqlalchemy>=2.0", "psycopg[binary]>=3.1", "pika>=1.3", "redis>=4.6",
+  "sqlalchemy>=2.0", "psycopg[binary]>=3.1", "pika>=1.3", "redis>=5.0",
+  "pyyaml>=6.0",
 ]
 
 [project.scripts]
 worker-health = "worker_health.transports.cli:main"
+
+# The SDK's own probe types are registered directly rather than through
+# entry points; this group is where a third-party distribution advertises
+# ITS probe types, and what ProbeFactory.load_plugins() reads.
+#
+#   [project.entry-points."worker_health.probes"]
+#   s3 = "mycompany.probes.s3:build_s3_probe"
 
 [tool.setuptools.packages.find]
 where = ["src"]

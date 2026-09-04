@@ -1,0 +1,1002 @@
+{
+  "title": "Worker Health Overview",
+  "uid": "worker-health-overview",
+  "tags": [
+    "worker-health",
+    "workers"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "label": "Data source"
+      },
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(worker_health_ready, service)",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "label": "Service"
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(worker_health_ready{service=~\"$service\"}, instance)",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "label": "Instance"
+      },
+      {
+        "name": "queue",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(worker_health_message_received_total{service=~\"$service\"}, queue)",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "label": "Queue"
+      },
+      {
+        "name": "check",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(worker_health_check_status{service=~\"$service\"}, check)",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "refresh": 2,
+        "label": "Check"
+      },
+      {
+        "name": "logs",
+        "type": "datasource",
+        "query": "loki",
+        "current": {},
+        "hide": 0,
+        "label": "Logs source"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Row 1 \u2014 Fleet readiness",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "title": "Workers ready",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum(worker_health_ready{service=~\"$service\",instance=~\"$instance\"})",
+          "legendFormat": "ready",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "expr": "count(worker_health_ready{service=~\"$service\",instance=~\"$instance\"})",
+          "legendFormat": "total",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Workers alive",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum(worker_health_live{service=~\"$service\",instance=~\"$instance\"})",
+          "legendFormat": "alive",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Critical checks failing",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "count(worker_health_check_status{service=~\"$service\",instance=~\"$instance\",critical=\"true\"} == 0) or vector(0)",
+          "legendFormat": "failing",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Worst evidence age",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "max(worker_health_oldest_eval_age_ms{service=~\"$service\",instance=~\"$instance\"})",
+          "legendFormat": "oldest eval",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Max loop lag",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "max(worker_health_loop_lag_ms{service=~\"$service\",instance=~\"$instance\"})",
+          "legendFormat": "loop lag",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Fleet status",
+      "type": "table",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_status{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "status",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "worker_health_live{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "live",
+          "refId": "B",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "worker_health_uptime_seconds{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "uptime",
+          "refId": "C",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "worker_health_loop_lag_ms{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "loop lag",
+          "refId": "D",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "ready",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "starting",
+                  "color": "blue",
+                  "index": 1
+                },
+                "2": {
+                  "text": "degraded",
+                  "color": "orange",
+                  "index": 2
+                },
+                "3": {
+                  "text": "unready",
+                  "color": "red",
+                  "index": 3
+                },
+                "4": {
+                  "text": "failing",
+                  "color": "red",
+                  "index": 4
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "instance",
+            "mode": "outer"
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Row 2 \u2014 Dependency status grid",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      }
+    },
+    {
+      "id": 9,
+      "title": "Check severity (0 ok .. 4 failing)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_check_severity{service=~\"$service\",instance=~\"$instance\",check=~\"$check\"}",
+          "legendFormat": "{{instance}} \u00b7 {{check}} ({{evidence}})",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "max": 4,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 10
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "ready",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "starting",
+                  "color": "blue",
+                  "index": 1
+                },
+                "2": {
+                  "text": "degraded",
+                  "color": "orange",
+                  "index": 2
+                },
+                "3": {
+                  "text": "unready",
+                  "color": "red",
+                  "index": 3
+                },
+                "4": {
+                  "text": "failing",
+                  "color": "red",
+                  "index": 4
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Dependency grid",
+      "type": "table",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_check_severity{service=~\"$service\",instance=~\"$instance\",check=~\"$check\"}",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "worker_health_check_latency_ms{service=~\"$service\",instance=~\"$instance\",check=~\"$check\"}",
+          "legendFormat": "",
+          "refId": "B",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "worker_health_check_evidence_age_ms{service=~\"$service\",instance=~\"$instance\",check=~\"$check\"}",
+          "legendFormat": "",
+          "refId": "C",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "expr": "worker_health_check_error{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "",
+          "refId": "D",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "ready",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "starting",
+                  "color": "blue",
+                  "index": 1
+                },
+                "2": {
+                  "text": "degraded",
+                  "color": "orange",
+                  "index": 2
+                },
+                "3": {
+                  "text": "unready",
+                  "color": "red",
+                  "index": 3
+                },
+                "4": {
+                  "text": "failing",
+                  "color": "red",
+                  "index": 4
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Check latency",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_check_latency_ms{service=~\"$service\",instance=~\"$instance\",check=~\"$check\"}",
+          "legendFormat": "{{instance}} \u00b7 {{check}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "Status transitions (rate)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "rate(worker_health_check_transitions_total{service=~\"$service\",instance=~\"$instance\",check=~\"$check\"}[5m])",
+          "legendFormat": "{{instance}} \u00b7 {{check}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Row 3 \u2014 Processing throughput and failures",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      }
+    },
+    {
+      "id": 14,
+      "title": "Messages per second",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (service, queue) (rate(worker_health_message_success_total{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\"}[1m]))",
+          "legendFormat": "{{service}} \u00b7 {{queue}} success",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "expr": "sum by (service, queue) (rate(worker_health_message_failure_total{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\"}[1m]))",
+          "legendFormat": "{{service}} \u00b7 {{queue}} failure",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "title": "Failure ratio",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (service, queue) (rate(worker_health_message_failure_total{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\"}[5m])) / clamp_min(sum by (service, queue) (rate(worker_health_message_received_total{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\"}[5m])), 0.001)",
+          "legendFormat": "{{service}} \u00b7 {{queue}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "Row 4 \u2014 Queue lag and silence detection",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      }
+    },
+    {
+      "id": 17,
+      "title": "Queue lag",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_queue_lag{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\"}",
+          "legendFormat": "{{service}} \u00b7 {{queue}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "title": "Silence: age of last message vs last success",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_last_message_age_seconds{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\"}",
+          "legendFormat": "{{queue}} last message",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "expr": "worker_health_last_success_age_seconds{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\"}",
+          "legendFormat": "{{queue}} last success",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Row 5 \u2014 Latency percentiles",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      }
+    },
+    {
+      "id": 20,
+      "title": "Handler duration",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_handler_duration_ms{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\",quantile=\"p50\"}",
+          "legendFormat": "{{queue}} p50",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "expr": "worker_health_handler_duration_ms{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\",quantile=\"p95\"}",
+          "legendFormat": "{{queue}} p95",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "expr": "worker_health_handler_duration_ms{service=~\"$service\",instance=~\"$instance\",queue=~\"$queue\",quantile=\"p99\"}",
+          "legendFormat": "{{queue}} p99",
+          "refId": "C",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 21,
+      "title": "Per-stage duration (p95)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_window_ms{service=~\"$service\",instance=~\"$instance\",metric=~\"worker\\\\..*stage.*\",stat=\"p95_ms\"}",
+          "legendFormat": "{{metric}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "row",
+      "title": "Row 6 \u2014 Evidence freshness",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      }
+    },
+    {
+      "id": 23,
+      "title": "Worker \u2192 health delta",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 48
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_worker_to_health_delta_ms{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "title": "Health evaluation age",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 48
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_eval_age_ms{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} newest",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        },
+        {
+          "expr": "worker_health_oldest_eval_age_ms{service=~\"$service\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} oldest",
+          "refId": "B",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 25,
+      "title": "Evidence age per check",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 48
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "worker_health_check_evidence_age_ms{service=~\"$service\",instance=~\"$instance\",check=~\"$check\"}",
+          "legendFormat": "{{check}} ({{evidence}})",
+          "refId": "A",
+          "instant": false,
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 26,
+      "type": "row",
+      "title": "Row 7 \u2014 State transitions",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      }
+    },
+    {
+      "id": 27,
+      "type": "logs",
+      "title": "State transition log (event=health_transition)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${logs}"
+      },
+      "targets": [
+        {
+          "expr": "{service=~\"$service\"} | json | event=\"health_transition\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true
+      },
+      "description": "Structured events from the SDK. Requires a Loki (or equivalent) datasource named by the `logs` variable; the same rows are also available from each worker's /events endpoint when no log pipeline is in place."
+    }
+  ]
+}

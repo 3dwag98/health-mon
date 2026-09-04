@@ -1,7 +1,8 @@
 """Notification worker: consumes billing.out, writes to Postgres and Redis.
 
 A second consumer on a different queue, so the fleet view has more than one
-shape of worker in it.
+shape of worker in it.  Like the billing worker, it contains no health code
+beyond the handler decorator.
 """
 from __future__ import annotations
 
@@ -9,12 +10,10 @@ import json
 import os
 import signal
 import sys
-import time
 
 from sqlalchemy import text
 
-import settings as S
-from runtime import build
+from runtime import build, consume_channel
 
 SERVICE = os.getenv("SERVICE", "notify")
 QUEUE = os.getenv("IN_QUEUE", "billing.out")
@@ -32,44 +31,31 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 def main() -> int:
     ctx = build(SERVICE, runner="thread", queue=QUEUE, pool_size=3)
-    log, monitor, broker = ctx["logger"], ctx["monitor"], ctx["broker"]
-    conn, tracker, engine, redis = (
-        ctx["connection"], ctx["tracker"], ctx["engine"], ctx["redis"]
-    )
+    log, conn = ctx["logger"], ctx["connection"]
+    tracker, engine, redis = ctx["tracker"], ctx["engine"], ctx["redis"]
 
     with engine.begin() as c:
         c.execute(text(SCHEMA))
 
-    channel = conn.channel()
-    channel.queue_declare(queue=QUEUE, durable=True)
-    channel.basic_qos(prefetch_count=S.PREFETCH)
-
-    from worker_health import classify_postgres, classify_redis
+    channel = consume_channel(ctx, QUEUE)
 
     @tracker.handler(queue=QUEUE)
     def process(body: bytes) -> None:
         msg = json.loads(body)
         with tracker.stage(QUEUE, "postgres_insert"):
-            with tracker.dependency("postgres", classify=classify_postgres):
-                with engine.begin() as c:
-                    c.execute(
-                        text("INSERT INTO notifications "
-                             "(account_id, invoice_id, balance_cents) "
-                             "VALUES (:a, :i, :b)"),
-                        {"a": msg["account_id"], "i": msg["invoice_id"],
-                         "b": msg["balance_cents"]},
-                    )
+            with engine.begin() as c:
+                c.execute(
+                    text("INSERT INTO notifications "
+                         "(account_id, invoice_id, balance_cents) "
+                         "VALUES (:a, :i, :b)"),
+                    {"a": msg["account_id"], "i": msg["invoice_id"],
+                     "b": msg["balance_cents"]},
+                )
         with tracker.stage(QUEUE, "redis_counter"):
-            with tracker.dependency("redis", classify=classify_redis):
-                redis.incr(f"notify:count:{msg['account_id']}")
-                redis.setex("notify:last", 300, msg["invoice_id"])
-
-    unacked = {"n": 0}
+            redis.incr(f"notify:count:{msg['account_id']}")
+            redis.setex("notify:last", 300, msg["invoice_id"])
 
     def on_message(ch, method, properties, body):
-        broker.update(last_delivery_at=time.monotonic())
-        unacked["n"] += 1
-        broker.update(unacked=unacked["n"])
         try:
             process(body)
         except Exception as exc:  # noqa: BLE001
@@ -79,13 +65,8 @@ def main() -> int:
             ch.basic_nack(method.delivery_tag, requeue=False)
         else:
             ch.basic_ack(method.delivery_tag)
-        finally:
-            unacked["n"] = max(0, unacked["n"] - 1)
-            broker.update(unacked=unacked["n"])
 
-    tag = channel.basic_consume(queue=QUEUE, on_message_callback=on_message)
-    broker.update(consumer_tags=(tag,), channel_open=True, connection_open=True,
-                  prefetch=S.PREFETCH)
+    channel.basic_consume(queue=QUEUE, on_message_callback=on_message)
 
     def shutdown(signum, frame):
         try:
@@ -99,8 +80,7 @@ def main() -> int:
     try:
         channel.start_consuming()
     finally:
-        monitor.stop(timeout=3)
-        ctx["server"].stop()
+        ctx["health"].stop(timeout=3)
         try:
             conn.close()
         except Exception:
