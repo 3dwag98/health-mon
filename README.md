@@ -42,7 +42,8 @@ one `lifespan=` argument. See [docs/USAGE.md](docs/USAGE.md).
 
 | Document | What is in it |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Component, threading, state-machine, evidence-ladder, wiring and deployment diagrams; the design decisions and what each one costs |
+| [docs/design.html](docs/design.html) | **Start here.** Single-page design documentation: how the SDK attaches to an existing worker, how a Django `manage.py` worker is wired, and the mechanisms behind liveness, readiness and draining — with drawn diagrams |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The same structures as Mermaid source, plus module layout and deployment |
 | [docs/USAGE.md](docs/USAGE.md) | Step-by-step guides: generic worker, Django, FastAPI, custom probes, troubleshooting |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every setting, every probe type and its params |
 | [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Metric reference, structured events, Grafana dashboard, alert rules |
