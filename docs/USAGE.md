@@ -148,6 +148,11 @@ workers built exactly this way.
 
 ## 2. Django
 
+A long-running Django worker is a management command that PM2 or systemd
+keeps alive. There are two ways to wire it; **the command class is the one
+to reach for**, and the settings-driven path exists for projects that
+cannot change the command's base class.
+
 ### Step 1 — install the app
 
 ```python
@@ -157,20 +162,47 @@ INSTALLED_APPS = [
 ]
 ```
 
-### Step 2 — configure
+### Step 2 — subclass the command
+
+```python
+# billing/management/commands/consume_billing.py
+from worker_health_django import WorkerHealthCommand
+
+class Command(WorkerHealthCommand):
+    health_service = "billing-worker"     # metric label; defaults to the command name
+    health_queue = "billing.in"
+
+    def handle(self, *args, **options):
+        @self.tracker.handler(queue="billing.in")
+        def handle_message(body: dict):
+            process_payment(body)         # ORM + cache observed automatically
+
+        for raw in consume(stop=self.stopping):
+            handle_message(json.loads(raw))
+```
+
+`handle()` is the method you would have written anyway. Four things change:
+
+| | |
+|---|---|
+| `self.tracker` | already built when `handle()` runs — no module global to reach through |
+| `self.stopping` | a `threading.Event`, set on SIGTERM/SIGINT. `self.sleep(n)` returns early on it, `self.should_stop` reads it |
+| `--health-port` | plus `--health-host`, `--health-service`, `--health-queue`, `--no-health` |
+| the process guard | *this* command is wired; `migrate`, `shell`, `test`, `runserver` are not, without either being listed anywhere |
+
+That last one is the reason to prefer this over settings. `AppConfig.ready()`
+runs for **every** `manage.py` entry point, so a settings-driven wiring has
+to guess from `sys.argv` which process is a worker. Subclassing is not a
+guess, and `should_wire()` checks for it first and steps aside.
+
+### Step 3 — configure the checks
 
 ```python
 WORKER_HEALTH = {
     "ENABLED": True,
-    "SERVICE": "billing-worker",
     "HOST": "127.0.0.1",          # loopback unless the port is published
-    "PORT": 8080,
-    "DEFAULT_QUEUE": "billing.in",
+    "PORT": 8080,                 # base port; see "Ports" below
     "BOOT_GRACE": 30,
-
-    # Only these management commands get a monitor. Without it, the
-    # default skip-list is used (migrate, collectstatic, shell, test, ...).
-    "COMMANDS": ["consume_billing"],
 
     # {alias: dependency name} — which ORM connections to observe.
     "DATABASES": {"default": "postgres"},
@@ -192,42 +224,155 @@ WORKER_HEALTH = {
 }
 ```
 
-`ready()` wires everything: the ORM is instrumented, the cache client is
-found and instrumented when it is Redis-backed, the probes are installed,
-and the health server starts.
+The ORM is instrumented, the cache client is found and instrumented when it
+is Redis-backed, the probes are installed, and the health server starts —
+in the worker process, on its own thread, never Django's.
 
-### Step 3 — the worker command
+### Step 4 — ports, when there is more than one worker
+
+Two `manage.py` workers on one host cannot both have 8080. In precedence
+order:
+
+```
+--health-port 8091                     explicit, wins over everything
+health_port = 8091                     on the command class
+"PORTS": {"consume_billing": 8091}     per command, keyed by command name
+"PORT": 8080  + instance ordinal       PM2 cluster: 8080, 8081, 8082, ...
+```
+
+The ordinal comes from `NODE_APP_INSTANCE` / `PM2_INSTANCE_ID` / `pm_id`, so
+`instances: 4` in PM2 lays a cluster out contiguously and gives each copy a
+metric label that survives a restart (a pid does not). If the chosen port is
+taken anyway, the next 20 are tried and the one actually bound is printed at
+startup and published to the run registry — a busy port never stops a worker
+from starting.
+
+```
+worker-health: billing-worker on http://127.0.0.1:8091
+  port 8090 was busy; bound 8091 instead
+```
+
+### Step 5 — shutdown
+
+PM2 sends SIGINT, Kubernetes sends SIGTERM, and both then wait before
+SIGKILL. Those seconds are for finishing the message in hand, so on the
+first signal the command:
+
+- reports **`unready` immediately** — 503 on `/ready`, still **200 on
+  `/live`**, so a liveness probe does not escalate an orderly shutdown into
+  a kill;
+- sets `self.stopping`, which `self.sleep()` and a well-written consume loop
+  watch;
+- calls `on_shutdown(signum)` — override it to break a blocking consume:
 
 ```python
-from django.core.management.base import BaseCommand
+    def on_shutdown(self, signum):
+        # signal-handler rules: one non-blocking thing
+        self.channel.connection.add_callback_threadsafe(self.channel.stop_consuming)
+```
+
+A second signal stops immediately. On the way out the monitor is stopped and
+the run-registry entry removed.
+
+### Step 6 — inspect the workers on a host
+
+`manage.py worker_health` is a **new process**, so it cannot read a monitor
+that lives in the worker. Every worker that binds a port publishes service,
+pid and port to a per-user run directory, and this reads it:
+
+```bash
+python manage.py worker_health --list      # every worker on this host
+python manage.py worker_health             # status of each, over HTTP
+python manage.py worker_health --json
+python manage.py worker_health --metrics
+python manage.py worker_health --url http://other-host:8080
+```
+
+```
+billing-worker (http://127.0.0.1:8091, pid 4412): readiness=ready liveness=alive
+  postgres           ok        observed      critical
+  redis-cache        ok        observed      non-critical
+  rabbitmq           ok        introspected  critical
+  queue billing.in   received=8134 succeeded=8130 failed=4 depth=12
+```
+
+The standalone CLI does the same without Django: `worker-health --list`,
+`worker-health` (discovers the only worker on the host), `worker-health
+--service billing-worker`.
+
+### Step 7 — under PM2
+
+```js
+// ecosystem.config.js
+module.exports = {
+  apps: [{
+    name: "billing-worker",
+    script: "manage.py",
+    args: "consume_billing",
+    interpreter: "python3",
+    instances: 2,                 // health ports 8080, 8081
+    kill_timeout: 30000,          // give the drain time to finish
+    env: { DJANGO_SETTINGS_MODULE: "project.settings" },
+  }],
+};
+```
+
+`kill_timeout` is the setting that matters: it is how long PM2 waits between
+the signal and SIGKILL, and therefore how much draining is actually allowed.
+
+### Step 8 — class-based consumers
+
+A consumer that carries state is naturally a class. `@handler` on a class
+wraps `__call__` in place:
+
+```python
+        @self.tracker.handler(queue="billing.in")
+        class BillingConsumer:
+            def __call__(self, body): ...
+
+        # or, when the entry point has a name:
+        @self.tracker.consumer_class(queue="billing.in", method="handle")
+        class BillingConsumer:
+            def handle(self, body): ...
+```
+
+Coroutines, async generators and sync generators are all detected. An
+`async def __call__` is timed **across the await** — the naive
+`inspect.iscoroutinefunction(instance)` check returns `False` for a callable
+instance, which silently measures how long it took to *create* the coroutine
+and reports every message as taking microseconds.
+
+### Alternative — no base class
+
+If the command cannot change its base class, name it in settings and reach
+for the tracker through module state:
+
+```python
+WORKER_HEALTH = {
+    "ENABLED": True,
+    # Only these management commands get a monitor.
+    "COMMANDS": ["consume_billing"],
+    # ...
+}
+```
+
+```python
 from worker_health_django import get_tracker
 
 class Command(BaseCommand):
-    help = "Consumes billing events"
-
     def handle(self, *args, **options):
         tracker = get_tracker()
 
         @tracker.handler(queue="billing.in")
-        def handle_message(body: dict):
-            process_payment(body)      # ORM queries observed automatically
-
-        for raw in consume_messages():
-            handle_message(json.loads(raw))
+        def handle_message(body): ...
 ```
 
 `get_tracker()` returns a no-op tracker when health is disabled, so the same
-command runs unchanged in a test suite or a shell.
+command runs unchanged in a test suite or a shell. `--health-port` cannot
+work on this path — the server is already bound by the time the command
+parses its arguments — and the port comes from settings alone.
 
-### Step 4 — inspect from the same process
-
-```bash
-python manage.py worker_health            # human-readable
-python manage.py worker_health --json     # the full snapshot
-python manage.py worker_health --metrics  # Prometheus exposition
-```
-
-### Step 5 — optional: in-app health URLs
+### Optional — in-app health URLs
 
 A Django worker usually serves no HTTP at all. Where a platform can only
 reach one port, mount the views:
@@ -244,7 +389,7 @@ answering under exactly the conditions they exist to report — the SDK's
 threaded port stays authoritative for liveness. There is no authentication;
 see [OPERATIONS.md](OPERATIONS.md#security).
 
-### Step 6 — optional: keep your existing django-health-check backends
+### Optional — keep your existing django-health-check backends
 
 If the project already uses
 [django-health-check](https://django-health-check.readthedocs.io/), its

@@ -36,7 +36,13 @@ def aggregate(
         if v is Status.FAILING and not spec.critical:
             v = Status.DEGRADED   # a non-critical failure never fails the whole
         if v is Status.UNKNOWN:
-            v = Status.DEGRADED   # no measurement is not an outage
+            # No measurement is not an outage -- but a CRITICAL dependency
+            # that has never answered is not something to route work to
+            # either.  Cold start, a probe that has timed out on every
+            # attempt, a check whose last result aged past its TTL: in all
+            # three the honest answer is "not ready", not "probably fine".
+            # Boot grace already covers the legitimate startup window above.
+            v = Status.FAILING if spec.critical else Status.DEGRADED
         if SEVERITY[v] > SEVERITY[worst]:
             worst = v
     return worst
@@ -83,7 +89,13 @@ def reasons(machine: StateMachine, liveness: Liveness) -> tuple[str, ...]:
         elif state is Status.DEGRADED:
             out.append(f"check {spec.name} is degraded ({_category(machine, spec.name)})")
         elif state is Status.UNKNOWN:
-            out.append(f"check {spec.name} has no current measurement")
+            kind = "critical" if spec.critical else "non-critical"
+            if machine.state(spec.name).last_result is None:
+                out.append(f"{kind} check {spec.name} has not completed its "
+                           "first evaluation")
+            else:
+                out.append(f"{kind} check {spec.name} has no current "
+                           "measurement (result older than its ttl)")
     return tuple(out)
 
 

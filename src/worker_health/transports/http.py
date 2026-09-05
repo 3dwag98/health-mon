@@ -12,6 +12,7 @@ is authenticated, so it must not be exposed to a public interface.
 """
 from __future__ import annotations
 
+import errno
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -93,6 +94,31 @@ class HealthServer:
         self._thread: threading.Thread | None = None
         self.host = host
         self.port = self._server.server_address[1]
+
+    @classmethod
+    def bind(cls, monitor, host: str = "0.0.0.0", port: int = 8080,
+             search: int = 0) -> "HealthServer":
+        """Bind ``port``, or the next free one within ``search`` above it.
+
+        Several worker processes on one host is the normal case -- a PM2
+        cluster, two management commands, a container sharing the host
+        network -- and they cannot all have 8080.  Searching upward keeps a
+        deterministic, contiguous block per host, which is what makes the
+        ports guessable from a supervisor config; the port actually taken is
+        published to the run registry so nothing has to guess.
+
+        ``search=0`` keeps the strict behaviour: bind the asked-for port or
+        raise, which is what a container with a published port wants.
+        """
+        last: OSError | None = None
+        for candidate in range(port, port + max(search, 0) + 1):
+            try:
+                return cls(monitor, host=host, port=candidate)
+            except OSError as exc:
+                if exc.errno not in (errno.EADDRINUSE, errno.EACCES):
+                    raise
+                last = exc
+        raise last  # type: ignore[misc]
 
     def start(self) -> "HealthServer":
         self._thread = threading.Thread(

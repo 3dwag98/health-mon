@@ -24,6 +24,7 @@ human watching, and it is better found there than at 3am.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -36,6 +37,7 @@ from .probes import ProbeFactory, ProbeSpec, default_factory
 from .telemetry.events import Event
 from .telemetry.logs import configure
 from .track import Tracker
+from .transports import registry
 from .transports.http import HealthServer
 
 
@@ -65,6 +67,15 @@ class WorkerHealth:
         self.monitor.stop(timeout=timeout)
         if self.server is not None:
             self.server.stop()
+        registry.unregister(getattr(self.monitor, "run_record", None))
+
+    def begin_shutdown(self, reason: str = "shutting down") -> None:
+        """Report unready now; keep serving /live while work drains."""
+        self.monitor.begin_shutdown(reason)
+
+    @property
+    def port(self) -> int | None:
+        return self.server.port if self.server is not None else None
 
     def __enter__(self) -> "WorkerHealth":
         return self
@@ -165,16 +176,27 @@ def setup_worker_health(
     server = None
     if config.serve_http:
         try:
-            server = HealthServer(
-                monitor, host=config.health_host, port=config.health_port
+            server = HealthServer.bind(
+                monitor, host=config.health_host, port=config.health_port,
+                search=config.health_port_search,
             ).start()
+            # Publish where we actually landed, so `worker-health` and
+            # `manage.py worker_health` in another shell can find this
+            # process without being told a port.
+            monitor.run_record = registry.register(
+                service=config.service, instance=monitor.instance,
+                host=config.health_host, port=server.port,
+                version=config.version, command=" ".join(sys.argv[:2]),
+            )
         except OSError as exc:
             # The port is taken -- most often a second copy of the same
             # worker on one host, or a Django autoreloader.  The monitor is
             # still useful (metrics, logs, the CLI), so this is reported and
             # survived rather than raised.
             logger.warning(
-                "health server could not bind; continuing without HTTP endpoints",
+                "health server could not bind port %s; continuing without HTTP "
+                "endpoints (metrics, logs and the CLI still work)",
+                config.health_port,
                 extra={"service": config.service, "category": type(exc).__name__},
             )
 
@@ -191,7 +213,7 @@ def setup_worker_health(
 
     monitor.events.emit(
         Event.WORKER_HEALTH_CONFIGURED,
-        port=config.health_port if server else None,
+        port=server.port if server else None,
         probes=[s.name for s in specs],
         instrumented=sorted(instrumented.values()),
         queue=config.default_queue,

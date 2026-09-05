@@ -175,7 +175,13 @@ def test_a_failed_critical_dependency_makes_the_worker_unready_then_recovers():
                      ttl=30.0, backoff_initial=0.1, backoff_max=0.2)
     monitor.start(boot_grace=0)
     try:
-        _wait(lambda: monitor.readiness() is Readiness.UNREADY, what="unready")
+        # Wait for the failure itself, not merely for unreadiness: with no
+        # boot grace the worker is already unready before the first
+        # evaluation lands, which is the point of the cold-start rule and
+        # would otherwise let this assertion pass for the wrong reason.
+        _wait(lambda: monitor.snapshot_dict()["checks"].get("dep", {})
+              .get("internal_status") == "failing", what="dep failing")
+        assert monitor.readiness() is Readiness.UNREADY
         snapshot = monitor.snapshot_dict()
         assert snapshot["checks"]["dep"]["category"] == "connection_refused"
 

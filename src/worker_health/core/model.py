@@ -235,6 +235,10 @@ class Snapshot:
     processing: Mapping[str, Mapping[str, float | int | str | None]] = field(
         default_factory=dict
     )
+    # Set once the process has been asked to stop.  A draining worker is
+    # still ALIVE -- killing it mid-message is the thing draining exists to
+    # avoid -- but it must stop being handed new work immediately.
+    draining: bool = False
 
     def check(self, name: str) -> CheckResult:
         return self.results[name]
@@ -245,6 +249,10 @@ class Snapshot:
 
     @property
     def readiness(self) -> Readiness:
+        # Draining outranks the dependency verdict: the worker may be
+        # perfectly healthy and is still about to exit.
+        if self.draining:
+            return Readiness.UNREADY
         # A process whose loop is not turning cannot process work, whatever
         # its dependencies say.
         if self.liveness is Liveness.UNALIVE:

@@ -136,6 +136,74 @@ Wire a **liveness** gate to `--live` and an alert to `/ready`. Restarting on
 `/ready` is what turns a shared-database outage into a fleet-wide crash
 loop.
 
+### A Django worker command
+
+```js
+  apps: [{
+    name: "billing-worker",
+    script: "manage.py",
+    args: "consume_billing",
+    interpreter: "python3",
+    instances: 2,                 // health ports 8080 and 8081
+    kill_timeout: 30000,          // how long the drain actually gets
+    env: { DJANGO_SETTINGS_MODULE: "project.settings" },
+  }]
+```
+
+`instances: 2` gives each copy `NODE_APP_INSTANCE`, which becomes both the
+port offset and the metric label — so a restart does not create a new time
+series the way a pid would.
+
+`kill_timeout` is the setting that matters most here: it is how long PM2
+waits between its stop signal and SIGKILL, and therefore how much draining
+is actually allowed. The default is 1600 ms, which is shorter than most
+handlers.
+
+---
+
+## Shutdown and draining
+
+A supervisor stopping a worker sends a signal and then waits. Those seconds
+are for finishing the message already in hand, and the two endpoints part
+company for exactly that window:
+
+```
+signal received  ->  /ready   503 unready      stop sending work here
+                     /live    200 alive        do NOT kill this yet
+                     draining: true            in the /health body
+                     reasons: ["SIGTERM received, draining"]
+```
+
+A liveness probe that 503s during a drain escalates an orderly shutdown into
+a SIGKILL and loses the in-flight message; keeping `/live` at 200 is what
+prevents that. `WorkerHealthCommand` does this automatically; a plain script
+calls `health.begin_shutdown()` from its own signal handler.
+
+The drain ends when the worker's loop returns, not on a timer — so a consume
+loop has to be interruptible. `self.stopping` (a `threading.Event`),
+`self.sleep(n)` and the `on_shutdown()` hook are there for that.
+
+---
+
+## Finding the workers on a host
+
+Every worker that binds a health port publishes service, instance, pid and
+port to a per-user run directory (`$XDG_RUNTIME_DIR/worker-health`, or
+`/tmp/worker-health-$UID`; `WORKER_HEALTH_RUNTIME_DIR` overrides it).
+Records whose process is gone are pruned by the next reader, so a SIGKILL
+leaves nothing behind.
+
+```bash
+worker-health --list                      # every worker on this host
+worker-health                             # the only one, if there is one
+worker-health --service billing-worker    # pick one by name
+python manage.py worker_health --list     # the same, inside a Django project
+```
+
+This is what makes a searched-for port usable: a worker whose configured
+port was busy prints the one it bound *and* publishes it, so nothing has to
+guess.
+
 ---
 
 ## Security

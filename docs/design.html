@@ -1,0 +1,970 @@
+<title>Worker Health Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    --bg: #fbfbfc;
+    --surface: #ffffff;
+    --surface-2: #f4f5f7;
+    --ink: #14171f;
+    --ink-dim: #59616f;
+    --ink-faint: #8b93a1;
+    --line: #e3e6eb;
+    --line-strong: #a9b1bf;
+    --accent: #2b5fd9;
+    --accent-wash: #eef3ff;
+    --ok: #17804a;
+    --warn: #9a6206;
+    --bad: #c0342b;
+    --ok-wash: #e8f6ee;
+    --warn-wash: #fdf3e0;
+    --bad-wash: #fdecea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1015; --surface: #151920; --surface-2: #1c2129;
+      --ink: #e7eaf0; --ink-dim: #9aa3b2; --ink-faint: #6d7686;
+      --line: #262c37; --line-strong: #525c6c;
+      --accent: #83a8ff; --accent-wash: #16203a;
+      --ok: #56d68d; --warn: #f0b545; --bad: #f97a70;
+      --ok-wash: #12291d; --warn-wash: #2c2210; --bad-wash: #2e1715;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1015; --surface: #151920; --surface-2: #1c2129;
+    --ink: #e7eaf0; --ink-dim: #9aa3b2; --ink-faint: #6d7686;
+    --line: #262c37; --line-strong: #525c6c;
+    --accent: #83a8ff; --accent-wash: #16203a;
+    --ok: #56d68d; --warn: #f0b545; --bad: #f97a70;
+    --ok-wash: #12291d; --warn-wash: #2c2210; --bad-wash: #2e1715;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---- layout ------------------------------------------------------ */
+  .shell { max-width: 1240px; margin: 0 auto; padding: 0 24px 96px; }
+  .cols { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: 48px; align-items: start; }
+  /* Grid items default to min-width:auto, which lets a wide table or a wide
+     figure push the whole page sideways instead of scrolling inside itself. */
+  .cols > * { min-width: 0; }
+  main section, main figure, main .scroll, main pre, main .tw { min-width: 0; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; gap: 0; } nav.toc { display: none; } }
+
+  nav.toc { position: sticky; top: 28px; padding-top: 8px; font-size: 13px; }
+  nav.toc a {
+    display: block; padding: 4px 0 4px 12px; color: var(--ink-faint);
+    text-decoration: none; border-left: 2px solid var(--line);
+    transition: color .12s, border-color .12s;
+  }
+  nav.toc a:hover { color: var(--accent); border-left-color: var(--accent); }
+  nav.toc .grp { margin-top: 16px; padding-left: 12px; font-size: 11px;
+                 letter-spacing: .09em; text-transform: uppercase; color: var(--ink-faint); }
+
+  /* Prose keeps a readable measure; figures and tables get the full column. */
+  main { min-width: 0; }
+  main > section > p, main > p, main ul, main ol, main pre, main .note,
+  figcaption { max-width: 78ch; }
+  main pre { max-width: 820px; }
+
+  /* ---- masthead ---------------------------------------------------- */
+  header.top { padding: 72px 0 40px; border-bottom: 1px solid var(--line); margin-bottom: 56px; }
+  .eyebrow { font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+             color: var(--accent); font-weight: 600; margin-bottom: 14px; }
+  h1 { font-size: 44px; line-height: 1.1; letter-spacing: -.025em; font-weight: 700;
+       margin: 0 0 18px; max-width: 16ch; }
+  .lede { font-size: 19px; line-height: 1.55; color: var(--ink-dim); max-width: 62ch; margin: 0; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
+  .facts span {
+    font-family: var(--mono); font-size: 12px; padding: 4px 10px;
+    border: 1px solid var(--line); border-radius: 999px; color: var(--ink-dim);
+    background: var(--surface);
+  }
+
+  /* ---- typography -------------------------------------------------- */
+  h2 { font-size: 27px; letter-spacing: -.02em; line-height: 1.2; font-weight: 650;
+       margin: 72px 0 6px; scroll-margin-top: 24px; }
+  h2 .num { color: var(--ink-faint); font-family: var(--mono); font-size: 15px;
+            font-weight: 500; display: block; margin-bottom: 8px; letter-spacing: 0; }
+  h3 { font-size: 18px; font-weight: 620; margin: 40px 0 10px; letter-spacing: -.01em; }
+  h4 { font-size: 15px; font-weight: 620; margin: 26px 0 6px; color: var(--ink-dim); }
+  p { margin: 14px 0; }
+  main > p, section > p { max-width: 68ch; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  strong { font-weight: 620; }
+  code { font-family: var(--mono); font-size: .875em; background: var(--surface-2);
+         padding: 1px 5px; border-radius: 4px; }
+  ul, ol { max-width: 68ch; padding-left: 22px; }
+  li { margin: 7px 0; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 64px 0; }
+
+  pre {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; font-family: var(--mono);
+    font-size: 13px; line-height: 1.65; margin: 18px 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .c { color: var(--ink-faint); }
+  .k { color: var(--accent); }
+  .add { color: var(--ok); font-weight: 500; }
+
+  /* ---- callouts ----------------------------------------------------- */
+  .note {
+    border-left: 3px solid var(--accent); background: var(--accent-wash);
+    padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 22px 0; max-width: 68ch;
+  }
+  .note p { margin: 6px 0; }
+  .note strong { color: var(--accent); }
+
+  /* ---- tables -------------------------------------------------------- */
+  .tw { overflow-x: auto; margin: 22px 0; max-width: 960px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 520px; }
+  th { text-align: left; font-weight: 600; font-size: 11px; letter-spacing: .07em;
+       text-transform: uppercase; color: var(--ink-faint);
+       border-bottom: 1px solid var(--line-strong); padding: 0 14px 8px 0; }
+  td { padding: 11px 14px 11px 0; border-bottom: 1px solid var(--line);
+       vertical-align: top; line-height: 1.5; }
+  td code { font-size: 12.5px; white-space: nowrap; }
+
+  /* ---- figures -------------------------------------------------------- */
+  figure { margin: 34px 0 40px; }
+  .scroll { overflow-x: auto; background: var(--surface);
+            border: 1px solid var(--line); border-radius: 12px; padding: 20px 18px; }
+  .dg { display: block; width: 100%; max-width: 1010px; height: auto; color: var(--ink); }
+  @media (max-width: 820px) { .dg { width: 700px; max-width: none; } }
+  figcaption { font-size: 13.5px; color: var(--ink-dim); line-height: 1.55;
+               margin-top: 12px; max-width: 68ch; }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .dg text { font-family: var(--sans); font-size: 13px; font-weight: 500; fill: currentColor; }
+  .dg .sm { font-size: 11.5px; font-weight: 400; fill: var(--ink-dim); }
+  .dg .xs { font-size: 10.5px; font-weight: 400; fill: var(--ink-faint); }
+  .dg .mono { font-family: var(--mono); font-size: 11.5px; font-weight: 400; }
+  .dg .ttl { font-size: 11px; font-weight: 600; letter-spacing: .07em; fill: var(--ink-faint); }
+  .dg .box { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
+  .dg .box2 { fill: var(--surface-2); stroke: var(--line); stroke-width: 1.2; }
+  .dg .boxa { fill: var(--accent-wash); stroke: var(--accent); stroke-width: 1.5; }
+  .dg .band { fill: none; stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 4; }
+  .dg .edge { stroke: var(--line-strong); stroke-width: 1.4; fill: none; }
+  .dg .edgea { stroke: var(--accent); stroke-width: 1.7; fill: none; }
+  .dg .dash { stroke-dasharray: 5 4; }
+  .dg .ac { fill: var(--accent); }
+  .dg .okf { fill: var(--ok-wash); stroke: var(--ok); stroke-width: 1.4; }
+  .dg .warnf { fill: var(--warn-wash); stroke: var(--warn); stroke-width: 1.4; }
+  .dg .badf { fill: var(--bad-wash); stroke: var(--bad); stroke-width: 1.4; }
+  .dg .okt { fill: var(--ok); font-weight: 600; }
+  .dg .warnt { fill: var(--warn); font-weight: 600; }
+  .dg .badt { fill: var(--bad); font-weight: 600; }
+  .dg .mk { fill: var(--line-strong); }
+  .dg .mka { fill: var(--accent); }
+  .dg .rule { stroke: var(--line); stroke-width: 1; }
+</style>
+
+<div class="shell">
+<header class="top">
+  <div class="eyebrow">Design documentation</div>
+  <h1>Worker Health SDK</h1>
+  <p class="lede">A message-driven worker can be alive and completely unable to
+  consume. Process status does not say whether work is happening. This is how the
+  SDK answers that question from the worker&rsquo;s own connections &mdash; and what
+  it asks of the code it is added to.</p>
+  <div class="facts">
+    <span>Python 3.11+</span><span>no required dependencies</span>
+    <span>Django &middot; FastAPI &middot; plain scripts</span>
+    <span>PM2 &middot; systemd &middot; Kubernetes</span>
+    <span>Postgres 16 &middot; Redis 7.2 &middot; RabbitMQ 3.10</span>
+  </div>
+</header>
+
+<div class="cols">
+<nav class="toc">
+  <div class="grp">Integration</div>
+  <a href="#surface">1 &nbsp;The integration surface</a>
+  <a href="#functions">2 &nbsp;Covering a function</a>
+  <a href="#django">3 &nbsp;Django manage.py workers</a>
+  <div class="grp">Mechanism</div>
+  <a href="#threads">4 &nbsp;Three threads</a>
+  <a href="#evidence">5 &nbsp;The evidence ladder</a>
+  <a href="#machine">6 &nbsp;Per-check state</a>
+  <a href="#verdict">7 &nbsp;Live, ready, draining</a>
+  <div class="grp">Reference</div>
+  <a href="#signals">8 &nbsp;Where signals go</a>
+  <a href="#modules">9 &nbsp;Module map</a>
+  <a href="#decisions">10 &nbsp;Decisions</a>
+</nav>
+
+<main>
+
+<section>
+<h2 id="surface"><span class="num">01</span>The integration surface</h2>
+
+<p>The SDK is a library that runs inside the worker process. It is not a sidecar,
+an agent, or a service to deploy. Adding it to an existing worker means three
+edits &mdash; and, deliberately, no edits at all to the code that does the work.</p>
+
+<figure class="wide">
+<div class="scroll">
+<svg class="dg" viewBox="0 0 960 680" role="img" aria-label="An existing worker file with three added lines; the SDK attaches a health server, a processing tracker, and auto-instrumentation, while the database, cache and broker call sites stay unchanged.">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
+    <marker id="a1x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mka"/></marker>
+  </defs>
+
+  <text class="ttl" x="16" y="34">WORKER.PY — THE FILE YOU ALREADY HAVE</text>
+  <text class="ttl" x="600" y="34">WHAT WORKER-HEALTH ATTACHES</text>
+  <rect class="box2" x="16" y="48" width="384" height="552" rx="10"/>
+
+  <rect class="ac" x="26" y="123" width="3" height="18"/>
+  <rect class="ac" x="26" y="273" width="3" height="143"/>
+  <rect class="ac" x="26" y="448" width="3" height="18"/>
+
+  <text class="mono" xml:space="preserve" x="54" y="82" fill="var(--ink-dim)">import pika, redis</text>
+  <text class="mono" xml:space="preserve" x="54" y="107" fill="var(--ink-dim)">from sqlalchemy import create_engine</text>
+  <text class="mono ac" x="36" y="132">+</text>
+  <text class="mono" xml:space="preserve" x="54" y="132">from worker_health import setup_worker_health</text>
+  <text class="mono" xml:space="preserve" x="54" y="182" fill="var(--ink-dim)">engine = create_engine(DSN)</text>
+  <text class="mono" xml:space="preserve" x="54" y="207" fill="var(--ink-dim)">cache  = redis.Redis(host="cache")</text>
+  <text class="mono" xml:space="preserve" x="54" y="232" fill="var(--ink-dim)">conn   = pika.BlockingConnection(params)</text>
+  <text class="mono ac" x="36" y="282">+</text>
+  <text class="mono" xml:space="preserve" x="54" y="282">health = setup_worker_health(</text>
+  <text class="mono" xml:space="preserve" x="54" y="307">    "billing-worker",</text>
+  <text class="mono" xml:space="preserve" x="54" y="332">    context={"db_engine": engine,</text>
+  <text class="mono" xml:space="preserve" x="54" y="357">             "redis_client": cache,</text>
+  <text class="mono" xml:space="preserve" x="54" y="382">             "connection": conn},</text>
+  <text class="mono" xml:space="preserve" x="54" y="407">)</text>
+  <text class="mono ac" x="36" y="457">+</text>
+  <text class="mono" xml:space="preserve" x="54" y="457">@health.handler(queue="billing.in")</text>
+  <text class="mono" xml:space="preserve" x="54" y="482" fill="var(--ink-dim)">def handle(msg):</text>
+  <text class="mono" xml:space="preserve" x="54" y="507" fill="var(--ink-dim)">    engine.execute(insert)</text>
+  <text class="mono" xml:space="preserve" x="54" y="532" fill="var(--ink-dim)">    cache.setex(key, 60, val)</text>
+  <text class="mono" xml:space="preserve" x="54" y="557" fill="var(--ink-dim)">    channel.basic_ack(tag)</text>
+
+  <path class="edge" d="M400 344 C 480 344, 520 288, 596 288" marker-end="url(#a1)"/>
+  <path class="edge" d="M400 457 C 480 457, 520 438, 596 438" marker-end="url(#a1)"/>
+  <path class="edgea dash" d="M400 532 C 480 532, 520 568, 596 568" marker-end="url(#a1x)"/>
+  <text class="xs" x="480" y="292" text-anchor="middle">starts a daemon thread</text>
+  <text class="xs" x="480" y="428" text-anchor="middle">times each message</text>
+  <text class="xs" x="480" y="524" text-anchor="middle">wrapped in place</text>
+
+  <rect class="box" x="600" y="236" width="344" height="104" rx="8"/>
+  <text x="620" y="266">Health server + scheduler</text>
+  <text class="mono sm" x="620" y="291">/live /ready /health /metrics /events</text>
+  <text class="sm" x="620" y="313">answers from a cached snapshot</text>
+
+  <rect class="box" x="600" y="396" width="344" height="84" rx="8"/>
+  <text x="620" y="426">Processing tracker</text>
+  <text class="sm" x="620" y="450">received · finished · failed · latency,</text>
+  <text class="sm" x="620" y="468">per queue</text>
+
+  <rect class="boxa" x="600" y="516" width="344" height="104" rx="8"/>
+  <text x="620" y="546">Auto-instrumentation</text>
+  <text class="sm" x="620" y="570">engine · cache · conn wrapped once,</text>
+  <text class="sm" x="620" y="592">at the client — call sites untouched</text>
+
+  <line class="rule" x1="16" y1="640" x2="944" y2="640"/>
+  <text class="sm" x="16" y="664">3 lines added · 0 call sites changed · nothing removed</text>
+</svg>
+</div>
+<figcaption><b>Figure 1 — the whole integration.</b> The two dark arrows are things
+the added lines create. The dashed one is the point: <code>context</code> hands the
+SDK the same engine, client and connection the worker already uses, and each is
+wrapped at the client object, so every query and command the worker was already
+making becomes health evidence &mdash; including from code three layers down in a
+service or repository that never hears about the SDK.</figcaption>
+</figure>
+
+<p>Everything else is configuration. Which dependencies are checked, how often,
+which are critical, what counts as a stalled queue &mdash; all of it lives in
+<code>worker-health.yaml</code>, Django settings, or environment variables, and none
+of it is code.</p>
+
+<div class="note">
+<p><strong>Why instrument the client rather than the call site.</strong> The
+alternative is a context manager at each call &mdash;
+<code>with tracker.dependency("postgres"):</code> &mdash; which works, and which
+nobody finishes applying. A repository three constructors deep either receives a
+tracker it should not know about, or its queries are invisible. Wrapping the
+client once means the coverage does not depend on discipline.</p>
+</div>
+</section>
+
+<section>
+<h2 id="functions"><span class="num">02</span>Covering a plain Python function</h2>
+
+<p>&ldquo;One unit of work&rdquo; is whatever the worker calls once per message.
+<code>@handler</code> dispatches on what the target actually is, because real
+consumers are not all plain functions:</p>
+
+<pre><code><span class="c"># a function, sync or async</span>
+@health.handler(queue=<span class="k">"billing.in"</span>)
+def handle(msg): ...
+
+<span class="c"># a generator — one message in, many values out, still one unit of work.</span>
+<span class="c"># Timed across the whole iteration; send/throw/close keep working.</span>
+@health.handler()
+def split(msg):
+    yield from rows(msg)
+
+<span class="c"># a class-based consumer: __call__ is wrapped in place, so isinstance</span>
+<span class="c"># checks and anything holding the class keep working</span>
+@health.handler(queue=<span class="k">"billing.in"</span>)
+class BillingConsumer:
+    async def __call__(self, msg): ...
+
+<span class="c"># …or when the entry point has a name</span>
+@health.tracker.consumer_class(method=<span class="k">"handle"</span>)
+class BillingConsumer:
+    def handle(self, msg): ...
+</code></pre>
+
+<p>The callable-instance case is the one worth naming.
+<code>inspect.iscoroutinefunction(instance)</code> returns <code>False</code> even
+when <code>__call__</code> is <code>async def</code>, because the coroutine
+function is on the type. A decorator that inspects the instance therefore picks
+the synchronous wrapper and times how long it took to <em>create</em> the
+coroutine &mdash; every message reports as taking microseconds, and the processing
+check goes quietly blind. Dispatch is on <code>type(obj).__call__</code>.</p>
+
+<h3>Work that is not a message at all</h3>
+
+<p>A cron-like function, a polling loop, or a third-party client the SDK has no
+adapter for:</p>
+
+<pre><code><span class="c"># A check of your own. Returns bool, Status, or CheckResult;</span>
+<span class="c"># if it raises, it reports `unknown` and no other check is affected.</span>
+@health.monitor.check(<span class="k">"vendor-api"</span>, critical=False, interval=30, timeout=2)
+def check_vendor():
+    return vendor.status() == <span class="k">"ok"</span>
+
+<span class="c"># A dependency call the instrumentation cannot see. One context</span>
+<span class="c"># manager is still cheaper than writing an adapter.</span>
+with health.tracker.dependency(<span class="k">"vendor-api"</span>):
+    vendor.charge(...)
+
+<span class="c"># Attributing latency inside a multi-dependency handler.</span>
+with health.tracker.stage(<span class="k">"billing.in"</span>, <span class="k">"postgres_txn"</span>):
+    ...
+</code></pre>
+</section>
+
+<section>
+<h2 id="django"><span class="num">03</span>Django workers that run via manage.py</h2>
+
+<p>A long-running Django worker is a management command that a supervisor keeps
+alive: <code>python manage.py consume_billing</code>. That shape has one problem
+that dominates every other design question here.</p>
+
+<p><code>AppConfig.ready()</code> is the only hook Django offers that runs after
+the app registry is populated and before a command executes &mdash; which makes it
+the right place to instrument the ORM, and a terrible place to start an HTTP
+server. It fires for <em>every</em> entry point: <code>migrate</code>,
+<code>shell</code>, <code>collectstatic</code>, a pytest run, the autoreloader's
+parent process, and every custom command a project has ever added. Settings-driven
+wiring has to guess from <code>sys.argv</code> which of them is a worker, and that
+guess decides which process binds a port.</p>
+
+<figure class="wide">
+<div class="scroll">
+<svg class="dg" viewBox="118 0 882 610" role="img" aria-label="Every manage.py entry point runs AppConfig.ready. A skip list and an autoreloader check reject most of them; a WorkerHealthCommand subclass wires health itself inside execute; otherwise the COMMANDS setting decides.">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
+    <marker id="a2x" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mka"/></marker>
+  </defs>
+
+  <rect class="box2" x="140" y="28" width="460" height="64" rx="8"/>
+  <text class="mono" x="164" y="54">python manage.py &lt;command&gt;</text>
+  <text class="sm" x="164" y="76">migrate · shell · runserver · import_csv · consume_billing</text>
+
+  <path class="edge" d="M370 92 L370 128" marker-end="url(#a2)"/>
+
+  <rect class="box" x="140" y="128" width="460" height="60" rx="8"/>
+  <text x="164" y="153">django.setup() → AppConfig.ready()</text>
+  <text class="sm" x="164" y="174">runs for every one of them — this is the whole problem</text>
+
+  <path class="edge" d="M370 188 L370 224" marker-end="url(#a2)"/>
+
+  <rect class="box" x="140" y="224" width="460" height="52" rx="8"/>
+  <text x="164" y="246">in the skip set, or the reloader’s parent?</text>
+  <text class="sm" x="164" y="266">migrate, shell, runserver, test, …</text>
+  <path class="edge" d="M600 250 L646 250" marker-end="url(#a2)"/>
+  <text class="xs" x="623" y="242" text-anchor="middle">yes</text>
+  <rect class="box2" x="650" y="224" width="330" height="52" rx="8"/>
+  <text class="sm" x="672" y="248">no monitor, no port bound</text>
+
+  <path class="edge" d="M370 276 L370 314" marker-end="url(#a2)"/>
+  <text class="xs" x="382" y="299">no</text>
+
+  <rect class="boxa" x="140" y="314" width="460" height="58" rx="8"/>
+  <text x="164" y="338">a WorkerHealthCommand subclass?</text>
+  <text class="sm" x="164" y="359">a declaration, not a guess — checked first</text>
+  <path class="edgea" d="M600 343 L646 343" marker-end="url(#a2x)"/>
+  <text class="xs" x="623" y="335" text-anchor="middle">yes</text>
+  <rect class="boxa" x="650" y="310" width="330" height="66" rx="8"/>
+  <text x="672" y="334">the command wires it, in execute()</text>
+  <text class="sm" x="672" y="356">--health-port · health_service · PORTS map</text>
+
+  <path class="edge" d="M370 372 L370 410" marker-end="url(#a2)"/>
+  <text class="xs" x="382" y="395">no</text>
+
+  <rect class="box" x="140" y="410" width="460" height="52" rx="8"/>
+  <text x="164" y="432">listed in COMMANDS?</text>
+  <text class="sm" x="164" y="452">or COMMANDS is unset</text>
+  <path class="edge" d="M600 436 L646 436" marker-end="url(#a2)"/>
+  <text class="xs" x="623" y="428" text-anchor="middle">yes</text>
+  <rect class="box2" x="650" y="410" width="330" height="52" rx="8"/>
+  <text class="sm" x="672" y="434">ready() wires it — port from settings only</text>
+
+  <path class="edge" d="M370 462 L370 500" marker-end="url(#a2)"/>
+  <text class="xs" x="382" y="485">no</text>
+  <rect class="box2" x="140" y="500" width="460" height="46" rx="8"/>
+  <text class="sm" x="164" y="528">no monitor</text>
+
+  <line class="rule" x1="140" y1="572" x2="980" y2="572"/>
+  <text class="sm" x="140" y="596">One of five entry points is a worker. The third test is the only one that is not a guess.</text>
+</svg>
+</div>
+<figcaption><b>Figure 2 — which process gets a monitor.</b>
+<code>should_wire()</code> tests a <code>WorkerHealthCommand</code> subclass before
+it consults settings, and steps aside when it finds one. That ordering is what
+makes <code>--health-port</code> work: if <code>ready()</code> wired first, a
+server would already be bound by the time the command parsed its arguments, and
+the flag would be silently useless.</figcaption>
+</figure>
+
+<h3>What the base class provides</h3>
+
+<pre><code>from worker_health_django import WorkerHealthCommand
+
+class Command(WorkerHealthCommand):
+    health_service = <span class="k">"billing-worker"</span>
+    health_queue = <span class="k">"billing.in"</span>
+
+    def handle(self, *args, **options):
+        @self.tracker.handler(queue=<span class="k">"billing.in"</span>)
+        def handle_message(body):
+            process_payment(body)      <span class="c"># ORM + cache observed automatically</span>
+
+        for raw in consume(stop=self.stopping):
+            handle_message(json.loads(raw))
+
+    def on_shutdown(self, signum):
+        <span class="c"># one non-blocking thing; self.stopping is already set</span>
+        self.channel.connection.add_callback_threadsafe(self.channel.stop_consuming)
+</code></pre>
+
+<p><code>handle()</code> is the method you would have written anyway. What changes:</p>
+
+<div class="tw">
+<table>
+<thead><tr><th>What</th><th>Why it has to come from the base class</th></tr></thead>
+<tbody>
+<tr><td><code>self.tracker</code></td><td>Django constructs the command, so nothing can be passed in. Without this, the alternative is reaching through a module-level global.</td></tr>
+<tr><td><code>self.stopping</code></td><td>A <code>threading.Event</code>, set on the first stop signal. <code>self.sleep(n)</code> returns early on it; <code>self.should_stop</code> reads it. A consume loop that cannot be interrupted turns every deploy into a SIGKILL.</td></tr>
+<tr><td><code>--health-port</code></td><td>Plus <code>--health-host</code>, <code>--health-service</code>, <code>--health-queue</code>, <code>--no-health</code>. Added in <code>create_parser</code>, not <code>add_arguments</code>, so a subclass that overrides <code>add_arguments</code> without calling <code>super()</code> does not lose them.</td></tr>
+<tr><td>the process guard</td><td>Figure 2. A declaration instead of an argv guess.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>Ports, when there is more than one worker</h3>
+
+<p>Two <code>manage.py</code> workers on one host cannot both have 8080. In
+precedence order:</p>
+
+<pre><code>--health-port 8091                     <span class="c">explicit; wins over everything</span>
+health_port = 8091                     <span class="c">on the command class</span>
+"PORTS": {"consume_billing": 8091}     <span class="c">per command, by command name</span>
+"PORT": 8080  + instance ordinal       <span class="c">PM2 cluster: 8080, 8081, 8082…</span>
+</code></pre>
+
+<p>The ordinal comes from <code>NODE_APP_INSTANCE</code> / <code>PM2_INSTANCE_ID</code>
+/ <code>pm_id</code>, so <code>instances: 4</code> lays a cluster out contiguously
+&mdash; and gives each copy a metric label that survives a restart, which a pid
+does not. If the chosen port is taken anyway the next twenty are tried, and the one
+actually bound is printed at startup and published to the host's run registry. A
+busy health port never stops a worker from starting.</p>
+
+<h3>Finding the workers on a host</h3>
+
+<p><code>manage.py worker_health</code> is a <em>new process</em>. The monitor lives
+in the worker that is still running somewhere else, so reading it out of module
+state returns nothing &mdash; always, for the exact use the command exists for.
+Every worker that binds a port writes service, instance, pid and port to a per-user
+run directory; records whose process is gone are pruned by the next reader, so a
+SIGKILL leaves nothing behind.</p>
+
+<pre><code>$ python manage.py worker_health
+billing-worker (http://127.0.0.1:8091, pid 4412): readiness=ready liveness=alive
+  postgres           ok        observed      critical
+  redis-cache        ok        observed      non-critical
+  rabbitmq           ok        introspected  critical
+  queue billing.in   received=8134 succeeded=8130 failed=4 depth=12
+</code></pre>
+
+<p>The standalone <code>worker-health</code> CLI reads the same registry, so
+<code>worker-health --list</code> works with no Django and no arguments.</p>
+</section>
+
+<hr>
+
+<section>
+<h2 id="threads"><span class="num">04</span>Three threads, two shared stores</h2>
+
+<p>The mechanism that makes the rest possible: <b>nothing on the request path
+performs I/O.</b> An endpoint reads a value that was already computed. That is
+what lets <code>/live</code> answer in microseconds while the worker is blocked
+inside a four-second handler, and what stops a supervisor polling every two
+seconds from becoming a load source on a database that is already struggling.</p>
+
+<figure class="wide">
+<div class="scroll">
+<svg class="dg" viewBox="0 0 900 650" role="img" aria-label="The worker thread writes outcomes into a traffic log; a scheduler thread reads it every 200 milliseconds and publishes a snapshot; the health server thread only reads that snapshot.">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
+  </defs>
+
+  <rect class="band" x="24" y="44" width="852" height="112" rx="10"/>
+  <text class="ttl" x="40" y="68">YOUR WORKER THREAD — THE CODE THAT WAS ALREADY THERE</text>
+  <rect class="box" x="40" y="84" width="210" height="56" rx="7"/>
+  <text class="sm" x="60" y="117">consume loop</text>
+  <path class="edge" d="M250 112 L276 112" marker-end="url(#a3)"/>
+  <rect class="boxa" x="280" y="84" width="240" height="56" rx="7"/>
+  <text class="sm" x="300" y="117">@handler wrapper</text>
+  <path class="edge" d="M520 112 L546 112" marker-end="url(#a3)"/>
+  <rect class="box" x="550" y="84" width="310" height="56" rx="7"/>
+  <text class="mono" x="570" y="117">execute() · setex() · basic_ack()</text>
+
+  <path class="edge" d="M450 156 L450 192" marker-end="url(#a3)"/>
+  <text class="xs" x="462" y="178">writes outcome + latency — a few microseconds</text>
+
+  <rect class="box2" x="40" y="192" width="820" height="56" rx="7"/>
+  <text x="60" y="216">Traffic log · processing counters</text>
+  <text class="sm" x="60" y="236">in memory; the only thing the worker thread ever touches</text>
+
+  <path class="edge" d="M450 248 L450 284" marker-end="url(#a3)"/>
+  <text class="xs" x="462" y="270">read on each tick — never written back</text>
+
+  <rect class="band" x="24" y="284" width="852" height="116" rx="10"/>
+  <text class="ttl" x="40" y="308">SCHEDULER THREAD — A 200 ms TICK</text>
+  <rect class="box" x="40" y="326" width="210" height="56" rx="7"/>
+  <text class="sm" x="60" y="359">which checks are due?</text>
+  <path class="edge" d="M250 354 L276 354" marker-end="url(#a3)"/>
+  <rect class="box" x="280" y="326" width="240" height="56" rx="7"/>
+  <text class="sm" x="300" y="352">run in a pool,</text>
+  <text class="sm" x="300" y="371">per-check timeout</text>
+  <path class="edge" d="M520 354 L546 354" marker-end="url(#a3)"/>
+  <rect class="box" x="550" y="326" width="310" height="56" rx="7"/>
+  <text class="sm" x="570" y="352">probe only if silent ·</text>
+  <text class="sm" x="570" y="371">thresholds · backoff</text>
+
+  <path class="edge" d="M450 400 L450 436" marker-end="url(#a3)"/>
+  <text class="xs" x="462" y="422">publishes a new snapshot</text>
+
+  <rect class="box2" x="40" y="436" width="820" height="56" rx="7"/>
+  <text x="60" y="460">Snapshot</text>
+  <text class="sm" x="60" y="480">the only thing an endpoint is allowed to read</text>
+
+  <path class="edge" d="M450 492 L450 528" marker-end="url(#a3)"/>
+  <text class="xs" x="462" y="514">serialise and respond — no I/O, no lock the worker holds</text>
+
+  <rect class="band" x="24" y="528" width="852" height="96" rx="10"/>
+  <text class="ttl" x="40" y="552">HEALTH SERVER THREAD — ITS OWN PORT, NEVER DJANGO’S</text>
+  <rect class="box" x="40" y="566" width="210" height="44" rx="7"/>
+  <text class="mono" x="60" y="594">/live</text>
+  <rect class="box" x="280" y="566" width="240" height="44" rx="7"/>
+  <text class="mono" x="300" y="594">/ready</text>
+  <rect class="box" x="550" y="566" width="310" height="44" rx="7"/>
+  <text class="mono" x="570" y="594">/health /metrics /events</text>
+</svg>
+</div>
+<figcaption><b>Figure 3 — the read path never touches a dependency.</b> Evidence is
+written by whoever was already doing the work; verdicts are computed off the hot
+path on a schedule; endpoints only read. The consequence that matters operationally:
+if the worker's loop wedges, the health port keeps answering &mdash; and reports the
+wedge, instead of timing out and being mistaken for a dead process.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2 id="evidence"><span class="num">05</span>The evidence ladder</h2>
+
+<p>A probe-first design reports healthy while a worker sits on a dead pooled
+connection: the probe opens its own socket, succeeds, and says nothing about the
+one the worker is actually blocked on. So a check prefers what the worker's own
+connection already proves, and falls back to asking only when the worker has gone
+quiet &mdash; and every result says which of the three it was, so a probe-backed
+green never reads like a traffic-backed green.</p>
+
+<figure class="wide">
+<div class="scroll">
+<svg class="dg" viewBox="0 0 880 450" role="img" aria-label="Three rungs of evidence: introspection of the client object, observation of real traffic, and a synthetic probe used only after a period of silence.">
+  <defs>
+    <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
+  </defs>
+
+  <rect class="box" x="40" y="40" width="520" height="78" rx="8"/>
+  <text x="64" y="70">1 · Introspected</text>
+  <text class="sm" x="64" y="94">ask the client object: pool size and checked-out count,</text>
+  <text class="sm" x="64" y="110">connection open, channel open, consumer tag present</text>
+  <text class="sm" x="590" y="72">free · zero I/O</text>
+  <text class="xs" x="590" y="92">always available, even mid-outage</text>
+
+  <path class="edge" d="M300 118 L300 154" marker-end="url(#a4)"/>
+  <text class="xs" x="314" y="140">nothing conclusive</text>
+
+  <rect class="box" x="40" y="154" width="520" height="78" rx="8"/>
+  <text x="64" y="184">2 · Observed</text>
+  <text class="sm" x="64" y="208">did the worker’s own traffic succeed within max_silence?</text>
+  <text class="sm" x="64" y="224">recorded by the instrumentation, at the client</text>
+  <text class="sm" x="590" y="186">free · the truest signal</text>
+  <text class="xs" x="590" y="206">under load, no probe ever runs</text>
+
+  <path class="edge" d="M300 232 L300 268" marker-end="url(#a4)"/>
+  <text class="xs" x="314" y="254">silent for longer than max_silence</text>
+
+  <rect class="boxa" x="40" y="268" width="520" height="78" rx="8"/>
+  <text x="64" y="298">3 · Probed</text>
+  <text class="sm" x="64" y="322">SELECT 1 / PING / passive declare — read-only, on its own</text>
+  <text class="sm" x="64" y="338">connection, under a timeout</text>
+  <text class="sm" x="590" y="300">one connection</text>
+  <text class="xs" x="590" y="320">only while the worker is quiet</text>
+
+  <rect class="box2" x="40" y="382" width="800" height="52" rx="8"/>
+  <text class="sm" x="64" y="404">A probe runs inside a ContextVar the instrumentation checks, so its own</text>
+  <text class="sm" x="64" y="422">query is never recorded as observed traffic — a probe cannot be its own evidence.</text>
+</svg>
+</div>
+<figcaption><b>Figure 4 — how one check reaches a verdict.</b> The ladder is also a
+cost ordering: the top two rungs are free and are what a busy worker actually uses.
+The probe exists for the quiet queue at 3am, which is precisely the case a
+traffic-only design gets wrong.</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+<thead><tr><th>Check</th><th>Introspected</th><th>Observed</th><th>Probed</th></tr></thead>
+<tbody>
+<tr><td><code>postgres</code></td><td>pool checked-out vs size, overflow</td><td>query outcome and latency</td><td><code>SELECT 1</code> on a NullPool connection</td></tr>
+<tr><td><code>redis</code></td><td>connection-pool counters</td><td>command outcome</td><td><code>PING</code> + <code>INFO</code></td></tr>
+<tr><td><code>rabbitmq</code></td><td>connection and channel open, consumer tags, unacked vs prefetch</td><td>last delivery, last ack</td><td>&mdash; <span class="sm">(passive declare, driven from the connection's own thread)</span></td></tr>
+<tr><td><code>processing</code></td><td>&mdash;</td><td>received / succeeded / failed, idle time against queue depth</td><td>&mdash;</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section>
+<h2 id="machine"><span class="num">06</span>Per-check state</h2>
+
+<p>A raw sample is not a status. One lost packet is not an outage, and a
+dependency that has just failed should not be asked again every two seconds while
+it is trying to recover. Each check runs its own small state machine over its
+samples, and the endpoints report the <em>effective</em> status &mdash; thresholds
+and TTL applied &mdash; never the last raw one.</p>
+
+<figure class="wide">
+<div class="scroll">
+<svg class="dg" viewBox="0 0 900 440" role="img" aria-label="A check moves from ok to failing after consecutive failures and back after consecutive successes; either state ages into unknown when no fresh result arrives within its TTL. While failing, the next attempt is deferred on an exponential ladder from five to sixty seconds.">
+  <defs>
+    <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
+  </defs>
+
+  <rect class="okf" x="60" y="110" width="180" height="60" rx="8"/>
+  <text class="okt" x="150" y="146" text-anchor="middle">ok</text>
+
+  <rect class="badf" x="400" y="110" width="180" height="60" rx="8"/>
+  <text class="badt" x="490" y="146" text-anchor="middle">failing</text>
+
+  <rect class="warnf" x="700" y="210" width="180" height="60" rx="8"/>
+  <text class="warnt" x="790" y="246" text-anchor="middle">unknown</text>
+
+  <path class="edge" d="M240 126 C 296 84, 344 84, 398 122" marker-end="url(#a5)"/>
+  <text class="sm" x="320" y="76" text-anchor="middle">failure_threshold consecutive failures (3)</text>
+
+  <path class="edge" d="M400 156 C 344 196, 296 196, 242 158" marker-end="url(#a5)"/>
+  <text class="sm" x="320" y="212" text-anchor="middle">success_threshold consecutive successes (2)</text>
+
+  <path class="edge" d="M150 170 L150 240 L696 240" marker-end="url(#a5)"/>
+  <path class="edge" d="M490 170 L490 240"/>
+  <text class="xs" x="524" y="232">no fresh result within its ttl</text>
+
+  <line class="rule" x1="60" y1="300" x2="840" y2="300"/>
+  <text class="ttl" x="60" y="330">WHILE FAILING, THE NEXT ATTEMPT IS DEFERRED</text>
+
+  <line class="edge" x1="90" y1="372" x2="762" y2="372"/>
+  <circle class="ac" cx="90" cy="372" r="4"/>
+  <circle class="ac" cx="200" cy="372" r="4"/>
+  <circle class="ac" cx="310" cy="372" r="4"/>
+  <circle class="ac" cx="420" cy="372" r="4"/>
+  <circle class="ac" cx="530" cy="372" r="4"/>
+  <circle class="ac" cx="640" cy="372" r="4"/>
+  <circle class="ac" cx="750" cy="372" r="4"/>
+  <text class="mono" x="145" y="360" text-anchor="middle">5s</text>
+  <text class="mono" x="255" y="360" text-anchor="middle">10s</text>
+  <text class="mono" x="365" y="360" text-anchor="middle">20s</text>
+  <text class="mono" x="475" y="360" text-anchor="middle">40s</text>
+  <text class="mono" x="585" y="360" text-anchor="middle">60s</text>
+  <text class="mono" x="695" y="360" text-anchor="middle">60s</text>
+  <text class="xs" x="90" y="396">attempt 1</text>
+  <text class="xs" x="750" y="396" text-anchor="middle">capped</text>
+  <text class="sm" x="60" y="424">±10% jitter, so a fleet does not retry in lockstep. One success resets the ladder.</text>
+</svg>
+</div>
+<figcaption><b>Figure 5 — hysteresis in both directions.</b> Recovery needs
+confirming as much as failure does: a single success after an outage usually means
+the first connection through a half-recovered pool. The backoff ladder is the
+guardrail against a hundred workers turning a database's bad minute into a retry
+storm &mdash; and it changes probe <em>frequency</em> only. A check that reported
+<code>unknown</code> while backing off would hide the outage it exists to survive.</figcaption>
+</figure>
+
+<div class="note">
+<p><strong>Cold start.</strong> Once boot grace is over, a critical check that has
+never completed an evaluation &mdash; or whose last result has aged past its TTL
+&mdash; makes the worker <b>unready</b>, not degraded. &ldquo;We have never managed
+to ask&rdquo; and &ldquo;we asked and it was fine&rdquo; are not the same answer, and
+only one of them is a reason to route work here.</p>
+</div>
+</section>
+
+<section>
+<h2 id="verdict"><span class="num">07</span>Live, ready, and draining</h2>
+
+<p>Two endpoints, two different questions, two different consequences. Conflating
+them is the single most expensive mistake available here: a liveness probe wired to
+a dependency check restarts an entire fleet when a shared database goes down, and
+none of the restarts fix the database.</p>
+
+<figure class="wide">
+<div class="scroll">
+<svg class="dg" viewBox="0 0 960 540" role="img" aria-label="Liveness depends only on loop lag and its 503 means restart; readiness applies draining, critical failures, boot grace and non-critical failures, and its 503 means only removal from rotation.">
+  <defs>
+    <marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
+  </defs>
+
+  <rect class="box2" x="380" y="16" width="200" height="46" rx="8"/>
+  <text class="sm" x="480" y="45" text-anchor="middle">the cached snapshot</text>
+  <path class="edge" d="M430 62 L430 78 L360 78 L360 104" marker-end="url(#a6)"/>
+  <path class="edge" d="M530 62 L530 78 L890 78 L890 104" marker-end="url(#a6)"/>
+
+  <text class="ttl" x="30" y="98">GET /live — IS THE LOOP TURNING?</text>
+  <rect class="box" x="30" y="110" width="410" height="48" rx="8"/>
+  <text class="sm" x="52" y="140">event-loop lag above the threshold?</text>
+
+  <rect class="okf" x="30" y="186" width="196" height="46" rx="8"/>
+  <text class="okt" x="128" y="215" text-anchor="middle">200 alive</text>
+  <rect class="badf" x="244" y="186" width="196" height="46" rx="8"/>
+  <text class="badt" x="342" y="215" text-anchor="middle">503 unalive</text>
+  <text class="xs" x="128" y="252" text-anchor="middle">no</text>
+  <text class="xs" x="342" y="252" text-anchor="middle">yes</text>
+
+  <rect class="box2" x="30" y="272" width="410" height="86" rx="8"/>
+  <text class="sm" x="52" y="298">A 503 here means the supervisor restarts this process.</text>
+  <text class="sm" x="52" y="318">So only the worker’s own loop may ever put it here.</text>
+  <text class="sm" x="52" y="344" fill="var(--bad)">A dependency failure never reaches this endpoint.</text>
+
+  <text class="ttl" x="510" y="98">GET /ready — SHOULD WORK BE SENT HERE?</text>
+
+  <line class="rule" x1="510" y1="112" x2="930" y2="112"/>
+  <text class="sm" x="510" y="138">a stop signal has been received?</text>
+  <rect class="badf" x="812" y="122" width="118" height="24" rx="6"/>
+  <text class="badt xs" x="871" y="139" text-anchor="middle">503 unready</text>
+
+  <line class="rule" x1="510" y1="152" x2="930" y2="152"/>
+  <text class="sm" x="510" y="172">a critical check failing…</text>
+  <text class="sm" x="510" y="190">…or unknown, or past its ttl?</text>
+  <rect class="badf" x="812" y="168" width="118" height="24" rx="6"/>
+  <text class="badt xs" x="871" y="185" text-anchor="middle">503 unready</text>
+
+  <line class="rule" x1="510" y1="204" x2="930" y2="204"/>
+  <text class="sm" x="510" y="230">still inside the boot grace?</text>
+  <rect class="warnf" x="812" y="214" width="118" height="24" rx="6"/>
+  <text class="warnt xs" x="871" y="231" text-anchor="middle">503 starting</text>
+
+  <line class="rule" x1="510" y1="248" x2="930" y2="248"/>
+  <text class="sm" x="510" y="274">a non-critical check failing?</text>
+  <rect class="warnf" x="812" y="258" width="118" height="24" rx="6"/>
+  <text class="warnt xs" x="871" y="275" text-anchor="middle">200 degraded</text>
+
+  <line class="rule" x1="510" y1="292" x2="930" y2="292"/>
+  <text class="sm" x="510" y="318">otherwise</text>
+  <rect class="okf" x="812" y="302" width="118" height="24" rx="6"/>
+  <text class="okt xs" x="871" y="319" text-anchor="middle">200 ready</text>
+  <line class="rule" x1="510" y1="336" x2="930" y2="336"/>
+
+  <text class="sm" x="510" y="362">A 503 here means: send work elsewhere.</text>
+  <text class="sm" x="510" y="382">Nothing is restarted, and nothing in flight is lost.</text>
+
+  <rect class="boxa" x="30" y="410" width="900" height="106" rx="10"/>
+  <text class="ttl" x="52" y="436">THE DRAIN WINDOW — WHY THE SPLIT EARNS ITS KEEP</text>
+  <text class="mono" x="52" y="464">SIGTERM  →  /ready 503 unready   ·   /live 200 alive   ·   draining: true</text>
+  <text class="sm" x="52" y="490">The seconds a supervisor waits before SIGKILL are for finishing the message in hand. Stop</text>
+  <text class="sm" x="52" y="508">sending work at once; do not let a liveness probe turn an orderly shutdown into a kill.</text>
+</svg>
+</div>
+<figcaption><b>Figure 6 — the two verdicts, and what each 503 costs.</b> Readiness is
+ordered: draining outranks the dependency verdict, and a wedged loop outranks
+everything, because a process that cannot turn its loop cannot process work however
+healthy its dependencies look. <code>degraded</code> stays at 200 deliberately
+&mdash; a cache being down is not a reason to take a worker out of rotation, and
+marking a cache <code>critical: true</code> is how a cache outage becomes a total
+one.</figcaption>
+</figure>
+</section>
+
+<hr>
+
+<section>
+<h2 id="signals"><span class="num">08</span>Where the signals go</h2>
+
+<p>One snapshot, four audiences. Each gets the shape it can act on, and none of
+them causes any I/O to a dependency.</p>
+
+<figure class="wide">
+<div class="scroll">
+<svg class="dg" viewBox="0 0 960 380" role="img" aria-label="The cached snapshot feeds four transports: live and ready endpoints for the supervisor, a metrics endpoint for Prometheus, an event stream for the dashboard, and structured logs on stdout.">
+  <defs>
+    <marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
+  </defs>
+
+  <rect class="boxa" x="30" y="150" width="200" height="70" rx="8"/>
+  <text x="130" y="180" text-anchor="middle">the snapshot</text>
+  <text class="sm" x="130" y="200" text-anchor="middle">computed once, per tick</text>
+
+  <path class="edge" d="M230 172 C 262 120, 268 70, 296 62" marker-end="url(#a7)"/>
+  <path class="edge" d="M230 180 C 262 160, 268 142, 296 142" marker-end="url(#a7)"/>
+  <path class="edge" d="M230 190 C 262 210, 268 222, 296 222" marker-end="url(#a7)"/>
+  <path class="edge" d="M230 198 C 262 250, 268 294, 296 302" marker-end="url(#a7)"/>
+
+  <rect class="box" x="300" y="38" width="240" height="48" rx="7"/>
+  <text class="mono" x="320" y="68">/live  /ready</text>
+  <path class="edge" d="M540 62 L596 62" marker-end="url(#a7)"/>
+  <text class="xs" x="568" y="54" text-anchor="middle">polled</text>
+  <rect class="box2" x="600" y="38" width="330" height="48" rx="7"/>
+  <text class="sm" x="620" y="60">PM2 · systemd · Kubernetes</text>
+  <text class="xs" x="620" y="78">restart on /live · rotate on /ready</text>
+
+  <rect class="box" x="300" y="118" width="240" height="48" rx="7"/>
+  <text class="mono" x="320" y="148">/metrics</text>
+  <path class="edge" d="M540 142 L596 142" marker-end="url(#a7)"/>
+  <text class="xs" x="568" y="134" text-anchor="middle">scraped</text>
+  <rect class="box2" x="600" y="118" width="330" height="48" rx="7"/>
+  <text class="sm" x="620" y="140">Prometheus → Grafana, alert rules</text>
+  <text class="xs" x="620" y="158">bounded labels; a binary series and a severity series</text>
+
+  <rect class="box" x="300" y="198" width="240" height="48" rx="7"/>
+  <text class="mono" x="320" y="228">/events  (SSE)</text>
+  <path class="edge" d="M540 222 L596 222" marker-end="url(#a7)"/>
+  <text class="xs" x="568" y="214" text-anchor="middle">streamed</text>
+  <rect class="box2" x="600" y="198" width="330" height="48" rx="7"/>
+  <text class="sm" x="620" y="220">fleet dashboard</text>
+  <text class="xs" x="620" y="238">live transitions across every worker</text>
+
+  <rect class="box" x="300" y="278" width="240" height="48" rx="7"/>
+  <text class="sm" x="320" y="308">structured JSON, stdout</text>
+  <path class="edge" d="M540 302 L596 302" marker-end="url(#a7)"/>
+  <text class="xs" x="568" y="294" text-anchor="middle">tailed</text>
+  <rect class="box2" x="600" y="278" width="330" height="48" rx="7"/>
+  <text class="sm" x="620" y="300">PM2 logs · any log pipeline</text>
+  <text class="xs" x="620" y="318">one line per transition, redacted</text>
+
+  <line class="rule" x1="30" y1="352" x2="930" y2="352"/>
+  <text class="sm" x="30" y="374">Only a closed set of error categories escapes the process — never a driver message, which is where DSNs live.</text>
+</svg>
+</div>
+<figcaption><b>Figure 7 — one verdict, four consumers.</b> Failure detail leaves the
+process as a value from a fixed <code>ErrorCategory</code> enum
+(<code>connection_refused</code>, <code>timeout</code>, <code>auth_failed</code>,
+&hellip;), never as a formatted driver exception. That is what makes secret safety a
+property of the type rather than of a redaction regex that has to keep up.</figcaption>
+</figure>
+</section>
+
+<section>
+<h2 id="modules"><span class="num">09</span>Module map</h2>
+
+<div class="tw">
+<table>
+<thead><tr><th>Module</th><th>Responsibility</th></tr></thead>
+<tbody>
+<tr><td><code>setup.py</code></td><td><code>setup_worker_health()</code> — the whole wiring in one call. Deliberately cannot fail a worker: a missing config file, an un-instrumentable client, a driver that is not installed are each visible in the health output rather than as a traceback at boot.</td></tr>
+<tr><td><code>monitor.py</code></td><td>Registration, scheduling, snapshot assembly, transitions, drain, restart policy.</td></tr>
+<tr><td><code>core/machine.py</code></td><td>Per-check state: thresholds, TTL at read time, effective status, backoff.</td></tr>
+<tr><td><code>core/aggregate.py</code></td><td>Criticality, boot grace, and the readiness verdict with its reasons.</td></tr>
+<tr><td><code>core/model.py</code></td><td><code>Status</code>, <code>Readiness</code>, <code>Liveness</code>, <code>Evidence</code>, <code>ErrorCategory</code>, and the maps between them.</td></tr>
+<tr><td><code>track.py</code></td><td><code>@handler</code> and the <code>processing</code> / <code>stage</code> / <code>dependency</code> context managers.</td></tr>
+<tr><td><code>instrument/</code></td><td>SQLAlchemy events, redis-py command wrapping, pika channel and connection callbacks, Django <code>execute_wrappers</code>. Plus the probe-active ContextVar.</td></tr>
+<tr><td><code>probes/</code></td><td><code>ProbeSpec</code>, <code>ProbeFactory</code>, the built-in builders, <code>"@name"</code> context references, entry-point plugin discovery.</td></tr>
+<tr><td><code>checks/</code></td><td>One module per dependency kind, each implementing the ladder in Figure 4.</td></tr>
+<tr><td><code>transports/</code></td><td>The HTTP server, the CLI, and the host run registry.</td></tr>
+<tr><td><code>telemetry/</code></td><td>Structured events, the Prometheus metric set, redaction.</td></tr>
+<tr><td><code>worker_health_django/</code></td><td><code>WorkerHealthCommand</code>, <code>AppConfig.ready()</code> autowiring, in-app views, and the django-health-check adapter.</td></tr>
+<tr><td><code>worker_health_fastapi/</code></td><td>The lifespan wiring, settings, and optional in-app routes.</td></tr>
+</tbody>
+</table>
+</div>
+</section>
+
+<section>
+<h2 id="decisions"><span class="num">10</span>Decisions, and what they cost</h2>
+
+<div class="tw">
+<table>
+<thead><tr><th>Decision</th><th>Rejected alternative</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Endpoints serve a cached snapshot</td><td>Run checks inside the request, as django-health-check does</td><td>A worker's health endpoint is polled forever. Checking inline makes health a load source, and slowest exactly when the dependency is already struggling.</td></tr>
+<tr><td>Instrument the client object</td><td>A context manager at each call site</td><td>Coverage stops depending on discipline. A repository three constructors deep is observed without knowing the SDK exists.</td></tr>
+<tr><td>Traffic first, probe on silence</td><td>Probe on a fixed interval</td><td>A probe on a fresh connection says nothing about the dead pooled one the worker is blocked on.</td></tr>
+<tr><td>Separate <code>/live</code> and <code>/ready</code></td><td>One health endpoint</td><td>A single endpoint wired to a liveness probe restarts the fleet when a shared database goes down.</td></tr>
+<tr><td><code>degraded</code> returns 200</td><td>HTTP 500 on any failure</td><td>A cache being down is not &ldquo;this service is broken&rdquo;. Leaving rotation for it converts a cache outage into a total one.</td></tr>
+<tr><td>A command base class declares itself</td><td>Infer the worker from <code>sys.argv</code> in <code>ready()</code></td><td>Every project has custom commands the skip list has never heard of, and the guess decides which process binds a port.</td></tr>
+<tr><td>Read-only probes only</td><td>django-health-check's write-a-row database check; RabbitMQ's <code>aliveness-test</code></td><td>Health checks must not mutate. A write-per-check also fails on a read-only replica, reporting an outage where there is a failover.</td></tr>
+<tr><td>Restart triggers are self-inflicted faults only</td><td>Restart on any critical failure</td><td>Restarting a worker does not fix Postgres. It converts one database outage into forty crash-looping processes hammering it, and destroys the in-flight work each was holding.</td></tr>
+<tr><td>A closed <code>ErrorCategory</code> enum</td><td>Formatted exception text with redaction</td><td>Secret safety by construction rather than by a regex that has to keep up with every driver's message format.</td></tr>
+<tr><td>No required dependencies</td><td>Depend on PyYAML, a driver, a metrics client</td><td>A health SDK that cannot start because a parser is missing is a poor advertisement for itself. YAML has a built-in subset loader; every driver is imported lazily by the adapter that needs it.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>What is deliberately not here</h3>
+<ul>
+<li><b>No agent or sidecar.</b> The evidence this design depends on &mdash; the
+worker's own pool, its own connection, its own traffic &mdash; only exists inside
+the process. A sidecar can only probe, which is the rung this design treats as the
+fallback.</li>
+<li><b>No Celery integration.</b> Recorded rather than built: <code>celery inspect
+ping</code> is answered from the main loop and documented not to respond while the
+worker is busy with a long task, so it reports unhealthy precisely when the worker
+is healthiest. That is the same failure this SDK is built to avoid, and the reason
+the answer is a separate thread with a cached snapshot.</li>
+<li><b>No authentication on the health port.</b> It binds where it is told and
+carries no secrets; loopback plus a supervisor is the deployment it is designed
+for.</li>
+</ul>
+</section>
+
+<hr>
+
+<p class="sm" style="color: var(--ink-faint); max-width: 68ch;">
+Companion documents in the repository:
+<a href="ARCHITECTURE.md">ARCHITECTURE.md</a> (the same structures as Mermaid
+source), <a href="USAGE.md">USAGE.md</a>,
+<a href="CONFIGURATION.md">CONFIGURATION.md</a>,
+<a href="OPERATIONS.md">OPERATIONS.md</a>,
+<a href="PRIOR-ART.md">PRIOR-ART.md</a>.
+</p>
+
+</main>
+</div>
+</div>

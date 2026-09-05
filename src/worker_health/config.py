@@ -43,6 +43,11 @@ class HealthConfig:
     # transport
     health_host: str = "0.0.0.0"
     health_port: int = 8080
+    # How many ports above health_port may be tried when it is taken.  0
+    # keeps the strict behaviour a container wants (bind what was published
+    # or nothing); a host running several workers sets it and lets them lay
+    # themselves out contiguously.
+    health_port_search: int = 0
     serve_http: bool = True
 
     # engine
@@ -89,7 +94,7 @@ class HealthConfig:
                 kwargs[target] = value
 
         config = cls(**kwargs)
-        config.probes = _parse_probes(normalised.get("probes"))
+        config.probes = coerce_probes(normalised.get("probes"))
         config.restart = dict(normalised.get("restart") or {})
         return config
 
@@ -158,7 +163,7 @@ _ALIASES = {
 }
 
 
-def _parse_probes(raw) -> list[ProbeSpec]:
+def coerce_probes(raw) -> list[ProbeSpec]:
     if not raw:
         return []
     if isinstance(raw, Mapping):
