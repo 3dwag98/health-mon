@@ -48,6 +48,7 @@ one `lifespan=` argument. See [docs/USAGE.md](docs/USAGE.md).
 | [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Metric reference, structured events, Grafana dashboard, alert rules |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Failure matrix, backoff and recovery, restart policy, PM2, security |
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | The short version of the above |
+| [docs/PRIOR-ART.md](docs/PRIOR-ART.md) | What django-health-check, fastapi-health and the Celery probes do, where this differs, and which of those differences came from reading them |
 
 ## Run it
 

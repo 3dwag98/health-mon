@@ -221,6 +221,20 @@ accepted the connection but never answered"* — and carries a built-in "How to
 read this page" guide covering the four states, the three evidence levels and
 what each graph shows.
 
+### Coexisting with an application's own metrics
+
+If the app already exposes `/metrics` through
+`prometheus-fastapi-instrumentator`, `starlette-exporter` or
+`django-prometheus`, worker-health's `/metrics` is a **second** endpoint on
+a **different** port. That is deliberate, not a conflict:
+
+- theirs measures HTTP traffic, which a worker does not have;
+- worker-health's port is served from its own thread, so it still answers
+  when the event loop is wedged — which is when you most want the numbers.
+
+Scrape both. The metric names do not collide (everything here is prefixed
+`worker_health_`), and the `service` / `instance` labels line the two up.
+
 ---
 
 ## Configuration reporting

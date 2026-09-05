@@ -227,6 +227,53 @@ python manage.py worker_health --json     # the full snapshot
 python manage.py worker_health --metrics  # Prometheus exposition
 ```
 
+### Step 5 — optional: in-app health URLs
+
+A Django worker usually serves no HTTP at all. Where a platform can only
+reach one port, mount the views:
+
+```python
+urlpatterns = [
+    path("internal/health/", include("worker_health_django.urls")),
+]
+```
+
+That serves `live`, `ready`, `health`, `config`, `events` and `metrics`
+under the prefix. They are served by Django's own worker, so they stop
+answering under exactly the conditions they exist to report — the SDK's
+threaded port stays authoritative for liveness. There is no authentication;
+see [OPERATIONS.md](OPERATIONS.md#security).
+
+### Step 6 — optional: keep your existing django-health-check backends
+
+If the project already uses
+[django-health-check](https://django-health-check.readthedocs.io/), its
+backends run as worker-health checks unchanged:
+
+```python
+WORKER_HEALTH = {
+    "ADOPT_HEALTH_CHECK_PLUGINS": True,
+    # The SDK's own django_db probe covers the database read-only;
+    # django-health-check's writes a row on every check.
+    "HEALTH_CHECK_SKIP": ["DatabaseBackend"],
+}
+```
+
+Each backend keeps its own `critical_service` setting and gains scheduling
+off the request path, a timeout, thresholds and backoff. A single backend
+can also be wired as a probe:
+
+```yaml
+- type: django_health_check
+  name: vendor-api
+  critical: false
+  interval: 30
+  params:
+    backend: "myapp.health:VendorBackend"
+```
+
+See [PRIOR-ART.md](PRIOR-ART.md#django) for what differs and why.
+
 A complete example lives in [`examples/django_worker/`](../examples/django_worker).
 
 ---

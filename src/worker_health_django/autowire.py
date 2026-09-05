@@ -16,6 +16,7 @@ a worker before wiring anything.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from typing import Any, Mapping
@@ -24,6 +25,8 @@ from worker_health import setup_worker_health
 from worker_health.config import HealthConfig
 
 from .state import set_health_state
+
+logger = logging.getLogger("worker_health")
 
 # Entry points that must never start a health server: they are short-lived,
 # they often run many at once (so the port would collide), and none of them
@@ -105,8 +108,36 @@ def autowire(config: Mapping[str, Any]):
     )
 
     _instrument_django(health.monitor, config)
+    _adopt_health_check_plugins(health.monitor, config)
     set_health_state(health)
     return health
+
+
+def _adopt_health_check_plugins(monitor, config: Mapping[str, Any]) -> None:
+    """Register existing django-health-check backends, if asked to.
+
+        WORKER_HEALTH = {
+            "ADOPT_HEALTH_CHECK_PLUGINS": True,
+            # The SDK's own django_db probe covers the database read-only;
+            # django-health-check's writes a row on every check.
+            "HEALTH_CHECK_SKIP": ["DatabaseBackend", "CacheBackend"],
+        }
+    """
+    if not config.get("ADOPT_HEALTH_CHECK_PLUGINS"):
+        return
+    try:
+        from .compat import install_health_check_plugins
+
+        install_health_check_plugins(
+            monitor,
+            interval=float(config.get("HEALTH_CHECK_INTERVAL", 30.0)),
+            timeout=float(config.get("HEALTH_CHECK_TIMEOUT", 5.0)),
+            skip=tuple(config.get("HEALTH_CHECK_SKIP", ())),
+        )
+    except Exception:
+        # An adoption failure must not stop a worker from starting; the
+        # SDK's own probes are unaffected.
+        logger.exception("could not adopt django-health-check plugins")
 
 
 def _instrument_django(monitor, config: Mapping[str, Any]) -> None:

@@ -20,6 +20,7 @@ def register_all(factory) -> None:
     factory.register_type("postgres", build_postgres)
     factory.register_type("sqlalchemy", build_postgres)      # alias
     factory.register_type("django_db", build_django_db)
+    factory.register_type("django_health_check", build_django_health_check)
     factory.register_type("redis", build_redis)
     factory.register_type("rabbitmq", build_rabbitmq)
     factory.register_type("kafka", build_kafka)
@@ -118,6 +119,27 @@ def build_django_db(spec: ProbeSpec, context: Mapping[str, Any]):
         name=spec.name,
         dependency=_dependency(spec, "postgres"),
     )
+
+
+def build_django_health_check(spec: ProbeSpec, context: Mapping[str, Any]):
+    """Adopt one existing django-health-check backend as a probe.
+
+    Lets a project that already has BaseHealthCheckBackend subclasses keep
+    them, and gain the scheduling, timeout, thresholds and criticality they
+    did not have. See worker_health_django.compat.
+    """
+    from worker_health_django.compat import DjangoHealthCheckAdapter
+
+    backend = _first(spec, "backend", "class")
+    if backend is None:
+        raise ProbeConfigError(
+            f"probe {spec.name!r}: needs `backend`, either "
+            f"'module:BackendClass' or '@some_context_key'"
+        )
+    if isinstance(backend, str):
+        backend = _import_target(backend)
+    return DjangoHealthCheckAdapter(backend, name=spec.name,
+                                    dependency=_dependency(spec, ""))
 
 
 def build_redis(spec: ProbeSpec, context: Mapping[str, Any]):

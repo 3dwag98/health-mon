@@ -117,6 +117,7 @@ backoff_initial=…, backoff_max=…, backoff_multiplier=…)`.
 |---|---|---|---|
 | `postgres` / `sqlalchemy` | introspect → observe → probe | `engine` **or** `dsn` | `probe_dsn`, `pool_warn_ratio` (0.9), `dependency` |
 | `django_db` | introspect → observe → probe | — | `alias` (`default`), `dependency` |
+| `django_health_check` | probe | `backend` | `dependency` — adopts an existing `BaseHealthCheckBackend` |
 | `redis` | introspect → observe → probe | `client` **or** `url` **or** `host` | `port`, `db`, `password`, `label`, `memory_warn_ratio` (0.9), `dependency` |
 | `rabbitmq` | introspect only | `broker_state`, `queue` | `backlog_threshold` (1000), `stale_after` (20) |
 | `kafka` | introspect only | — (a `state` is created if absent) | `state`, `group`, `topics`, `max_lag` (10000), `stale_after` (30), `max_rebalance` (60), `lag_fn` |

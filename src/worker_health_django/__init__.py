@@ -27,9 +27,15 @@ Then, in the worker command:
     def handle_message(body: dict):
         process_payment(body)
 """
+from .compat import (
+    DjangoHealthCheckAdapter,
+    discover_backends,
+    install_health_check_plugins,
+)
 from .state import get_health, get_monitor, get_tracker, set_health_state
 
 default_app_config = "worker_health_django.apps.WorkerHealthConfig"
 
 __all__ = ["get_health", "get_monitor", "get_tracker", "set_health_state",
-           "default_app_config"]
+           "DjangoHealthCheckAdapter", "install_health_check_plugins",
+           "discover_backends", "default_app_config"]

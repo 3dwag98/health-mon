@@ -30,6 +30,9 @@ dev = [
   "pytest>=8", "pytest-timeout", "httpx",
   "sqlalchemy>=2.0", "psycopg[binary]>=3.1", "pika>=1.3", "redis>=5.0",
   "pyyaml>=6.0",
+  # The Django tests run against a real Django and a sqlite database; they
+  # skip cleanly when it is absent, but CI should have it.
+  "django>=4.2",
 ]
 
 [project.scripts]

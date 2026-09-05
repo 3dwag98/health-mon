@@ -1,13 +1,22 @@
 """Django ORM auto-instrumentation.
 
-Django has no query event hook, so ``CursorWrapper.execute`` /
-``executemany`` are the funnel -- every ORM query, every ``raw()``, and
-every ``connection.cursor()`` call goes through them.
+Uses ``connection.execute_wrappers`` -- Django's own documented database
+instrumentation hook, added in 2.0 -- rather than monkeypatching
+``CursorWrapper.execute``.  Four things that buys:
 
-The class is shared by all databases in the process, so the wrapper routes
-by connection alias: ``default`` and ``replica`` report as two dependencies
-if they were registered as two.  A query on an alias nobody registered is
-passed straight through and costs one dict lookup.
+* it is a supported API, so a Django upgrade that reorganises the cursor
+  internals does not silently stop the instrumentation;
+* it covers ``executemany`` through the ``many`` flag, with no second patch;
+* it composes.  Django Debug Toolbar, django-silk and Scout all append to
+  the same list, so worker-health sits alongside them instead of fighting
+  over one method;
+* it is per-connection, so routing by alias is natural rather than a lookup
+  bolted onto a shared class.
+
+The wrapper is installed from a ``connection_created`` receiver, and also
+directly onto any connection that already exists -- Django will usually
+have connected before an AppConfig's ``ready()`` runs, and a receiver alone
+would miss those.
 """
 from __future__ import annotations
 
@@ -17,62 +26,88 @@ from ..checks.postgres import classify_postgres
 from .context import is_health_probe_active
 from .recorder import TrafficRecorder
 
-_FLAG = "_worker_health_instrumented"
+DISPATCH_UID = "worker_health.instrument.django"
+
+# alias -> recorder.  Read at query time, so registering a second alias does
+# not need the wrapper to be reinstalled.
 _TARGETS: dict[str, TrafficRecorder] = {}
+_INSTALLED = False
+
+
+class _QueryWrapper:
+    """The execute wrapper itself.
+
+    One instance is shared by every connection: it routes on the alias in
+    the context Django hands it, so a `default` and a `replica` connection
+    report as two dependencies without two wrappers.
+    """
+
+    __slots__ = ()
+
+    def __call__(self, execute, sql, params, many, context):
+        recorder = _TARGETS.get(_alias(context))
+        # The health probe issues SELECT 1 through this same path.  Counting
+        # it would make a silent worker look busy -- the exact false green
+        # the evidence ladder exists to prevent.
+        if recorder is None or is_health_probe_active():
+            return execute(sql, params, many, context)
+
+        started = time.perf_counter()
+        try:
+            result = execute(sql, params, many, context)
+        except Exception as exc:
+            recorder.failure(exc)
+            raise
+        recorder.success((time.perf_counter() - started) * 1000.0)
+        return result
+
+    def __eq__(self, other) -> bool:
+        # So an "is it already installed" check works across instances.
+        return isinstance(other, _QueryWrapper)
+
+    def __hash__(self) -> int:
+        return hash(_QueryWrapper)
+
+
+_WRAPPER = _QueryWrapper()
+
+
+def _alias(context) -> str:
+    connection = (context or {}).get("connection")
+    return getattr(connection, "alias", "default")
+
+
+def _install_on(connection) -> None:
+    wrappers = getattr(connection, "execute_wrappers", None)
+    if wrappers is None or _WRAPPER in wrappers:
+        return
+    wrappers.append(_WRAPPER)
+
+
+def _on_connection_created(sender=None, connection=None, **kwargs) -> None:
+    if connection is not None:
+        _install_on(connection)
 
 
 def instrument_django_db(monitor, dependency_name: str = "postgres",
                          alias: str = "default"):
     """Record every ORM query on ``alias`` as observed traffic."""
-    from django.db.backends.utils import CursorWrapper
+    global _INSTALLED
+
+    from django.db import connections
+    from django.db.backends.signals import connection_created
 
     _TARGETS[alias] = TrafficRecorder(monitor, dependency_name, classify_postgres)
 
-    if getattr(CursorWrapper, _FLAG, False):
+    if _INSTALLED:
         return
-
-    original_execute = CursorWrapper.execute
-    original_executemany = CursorWrapper.executemany
-
-    def _recorder(self) -> TrafficRecorder | None:
-        db = getattr(self, "db", None)
-        return _TARGETS.get(getattr(db, "alias", "default"))
-
-    def execute_wrapper(self, sql, params=None):
-        recorder = _recorder(self)
-        # The health probe issues SELECT 1 through this same wrapper.
-        # Counting it would make a silent worker look busy -- the exact
-        # false green the evidence ladder exists to prevent.
-        if recorder is None or is_health_probe_active():
-            return original_execute(self, sql, params)
-
-        started = time.perf_counter()
-        try:
-            result = original_execute(self, sql, params)
-        except Exception as exc:
-            recorder.failure(exc)
-            raise
-        recorder.success((time.perf_counter() - started) * 1000.0)
-        return result
-
-    def executemany_wrapper(self, sql, param_list):
-        recorder = _recorder(self)
-        if recorder is None or is_health_probe_active():
-            return original_executemany(self, sql, param_list)
-
-        started = time.perf_counter()
-        try:
-            result = original_executemany(self, sql, param_list)
-        except Exception as exc:
-            recorder.failure(exc)
-            raise
-        recorder.success((time.perf_counter() - started) * 1000.0)
-        return result
-
-    CursorWrapper.execute = execute_wrapper
-    CursorWrapper.executemany = executemany_wrapper
-    CursorWrapper._worker_health_original = (original_execute, original_executemany)
-    setattr(CursorWrapper, _FLAG, True)
+    # New connections, including the ones a thread opens later.
+    connection_created.connect(_on_connection_created, dispatch_uid=DISPATCH_UID)
+    # And the ones already open: by the time an AppConfig is ready, Django
+    # has usually connected at least once.
+    for connection in connections.all():
+        _install_on(connection)
+    _INSTALLED = True
 
 
 def instrument_django_cache(monitor, dependency_name: str = "redis",
@@ -119,12 +154,22 @@ def _underlying_redis(cache):
 
 
 def uninstrument_django_db() -> None:
-    from django.db.backends.utils import CursorWrapper
+    """Remove the wrapper and the receiver.  For fixtures and test runs."""
+    global _INSTALLED
 
-    original = getattr(CursorWrapper, "_worker_health_original", None)
-    if original is not None:
-        CursorWrapper.execute, CursorWrapper.executemany = original
-        delattr(CursorWrapper, "_worker_health_original")
+    try:
+        from django.db import connections
+        from django.db.backends.signals import connection_created
+    except Exception:
+        _TARGETS.clear()
+        _INSTALLED = False
+        return
+
+    connection_created.disconnect(dispatch_uid=DISPATCH_UID)
+    for connection in connections.all():
+        wrappers = getattr(connection, "execute_wrappers", None)
+        if wrappers:
+            connection.execute_wrappers = [w for w in wrappers
+                                           if not isinstance(w, _QueryWrapper)]
     _TARGETS.clear()
-    if hasattr(CursorWrapper, _FLAG):
-        delattr(CursorWrapper, _FLAG)
+    _INSTALLED = False
