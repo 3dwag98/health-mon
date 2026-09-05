@@ -569,3 +569,52 @@ def test_ready_stays_lean_while_health_carries_the_settings():
 
     assert "config" not in lean["checks"]["db"]
     assert full["checks"]["db"]["config"]["interval_s"] == 0.1
+
+
+def test_each_queue_reports_its_own_counters_not_the_workers_total():
+    """A worker consuming two queues can be healthy on one and stalled on
+    the other.  Reporting the aggregate under both labels averages that
+    away -- and multiplies every per-queue metric by the queue count."""
+    from worker_health import Tracker
+    from worker_health.checks.processing import ProcessingState
+
+    monitor = _monitor()
+    tracker = Tracker(monitor, ProcessingState(), default_queue="billing.in")
+
+    @tracker.handler(queue="billing.in")
+    def billing(n):
+        return n
+
+    @tracker.handler(queue="notify.in")
+    def notify(n):
+        return n
+
+    for i in range(5):
+        billing(i)
+    for i in range(2):
+        notify(i)
+
+    processing = monitor.snapshot_dict()["processing"]
+    assert processing["billing.in"]["received"] == 5
+    assert processing["billing.in"]["succeeded"] == 5
+    assert processing["notify.in"]["received"] == 2
+    assert processing["notify.in"]["succeeded"] == 2
+    # The sum across labels is the real total, not a multiple of it.
+    assert sum(q["received"] for q in processing.values()) == 7
+
+
+def test_a_queue_with_no_traffic_yet_reports_zero_not_its_neighbours_count():
+    from worker_health import Tracker
+    from worker_health.checks.processing import ProcessingState
+
+    monitor = _monitor()
+    tracker = Tracker(monitor, ProcessingState(), default_queue="default")
+
+    @tracker.handler(queue="real.in")
+    def work(n):
+        return n
+
+    work(1)
+    processing = monitor.snapshot_dict()["processing"]
+    assert processing["real.in"]["received"] == 1
+    assert processing["default"]["received"] == 0

@@ -44,7 +44,12 @@ class ProcessingBinding:
         self.broker_state = broker_state
 
     def read(self) -> dict:
-        data = dict(self.state.read())
+        # This queue's counters, not the whole worker's.  ProcessingState
+        # keeps both, and reading the aggregate here reported every queue's
+        # label with the worker-wide totals -- indistinguishable from
+        # correct with one queue, and a silent multiplication of every
+        # per-queue metric by the number of queues with two.
+        data = dict(self.state.read(self.queue))
         depth = None
         if self.broker_state is not None:
             try:
