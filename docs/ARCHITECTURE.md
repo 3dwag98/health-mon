@@ -94,7 +94,7 @@ flowchart TB
             end
 
             SNAP["Snapshot<br/>cached, no I/O on read"]
-            HTTP["HealthServer thread<br/>/live /ready /health /metrics /events"]
+            HTTP["HealthServer thread<br/>/live /ready /health<br/>/config /metrics /events"]
             EV["EventEmitter<br/>structured JSON events"]
         end
     end

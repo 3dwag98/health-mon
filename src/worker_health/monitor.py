@@ -84,7 +84,13 @@ class HealthMonitor:
 
         self._started_at = self.clock.monotonic()
         self._boot_deadline: float | None = None
+        self._boot_grace: float = 0.0
         self._boot_done = False
+        # Set by setup_worker_health so /config can also report where the
+        # configuration came from and which clients are being observed.
+        self._config = None
+        self._config_source: str | None = None
+        self._instrumented: dict[str, str] = {}
         self._loop_beat = self.clock.monotonic()
         self._loop_lag_threshold_ms = loop_lag_threshold_ms
         self._last_activity: float | None = None
@@ -140,6 +146,19 @@ class HealthMonitor:
         """Bind a queue's processing counters for the metrics exporter."""
         self.processing[queue] = ProcessingBinding(queue, state, broker_state)
 
+    def attach_config(self, config, *, source: str | None = None,
+                      instrumented: dict | None = None) -> None:
+        """Record the configuration this monitor was built from.
+
+        Only used for reporting.  Nothing reads it to make a decision -- the
+        state machine already holds the settings it runs on, and two sources
+        of truth for a threshold is how a dashboard ends up disagreeing with
+        the behaviour it is describing.
+        """
+        self._config = config
+        self._config_source = source
+        self._instrumented = dict(instrumented or {})
+
     def set_restart_policy(self, policy) -> None:
         self._restart_policy = policy
         policy.bind(self)
@@ -155,6 +174,7 @@ class HealthMonitor:
 
     def start(self, boot_grace: float = 30.0) -> "HealthMonitor":
         self._started_at = self.clock.monotonic()
+        self._boot_grace = boot_grace
         self._boot_deadline = self._started_at + boot_grace if boot_grace else None
         self._loop_beat = self.clock.monotonic()
         self._boot_done = False
@@ -400,10 +420,85 @@ class HealthMonitor:
     def transitions(self, name: str) -> int:
         return self.machine.transitions(name)
 
+    # -- configuration reporting ------------------------------------------ #
+
+    def check_config(self, name: str) -> dict:
+        """The settings one check is actually running on.
+
+        Read off the state machine rather than off the config file, so what
+        is reported is what is in force -- including anything a caller
+        changed at runtime.
+        """
+        spec = self.machine.spec(name)
+        check = self.checks.get(name)
+        body = {
+            "critical": spec.critical,
+            "enabled": spec.enabled,
+            "interval_s": spec.interval,
+            "timeout_s": spec.timeout,
+            "ttl_s": spec.ttl,
+            "failure_threshold": spec.failure_threshold,
+            "success_threshold": spec.success_threshold,
+            "max_silence_s": spec.max_silence,
+            "backoff_initial_s": spec.backoff_initial,
+            "backoff_max_s": spec.backoff_max,
+            "backoff_multiplier": spec.backoff_multiplier,
+        }
+        if check is not None:
+            body["check_class"] = type(check).__name__
+            dependency = getattr(check, "dependency", "")
+            if dependency:
+                # Which traffic-log entry this check reads observed evidence
+                # from -- the answer to "why does this say probed?".
+                body["dependency"] = dependency
+        return body
+
+    def describe_config(self) -> dict:
+        """Everything behind the verdicts, for an operator to read.
+
+        Answers the questions a dashboard cannot otherwise answer: how often
+        is this checked, how many failures does it take, is it critical, and
+        where did that setting come from.  Redacted -- probe params can hold
+        a DSN.
+        """
+        body: dict = {
+            "service": self.service,
+            "instance": self.instance,
+            "version": self.version,
+            "runner": self._runner_name,
+            "boot_grace_s": self._boot_grace,
+            "loop_lag_threshold_ms": self._loop_lag_threshold_ms,
+            "checks": {s.name: self.check_config(s.name) for s in self.machine.specs},
+            "queues": sorted(self.processing),
+        }
+        if self._instrumented:
+            # Which clients are being observed, and under what dependency
+            # name. The one line to read when evidence says `probed` and you
+            # expected `observed`.
+            body["instrumented"] = dict(self._instrumented)
+        if self._config is not None:
+            try:
+                config = self._config.redacted()
+            except Exception:
+                config = {}
+            body["source"] = self._config_source
+            body["worker"] = {
+                key: config.get(key) for key in
+                ("health_host", "health_port", "default_queue", "log_level",
+                 "max_idle", "max_since_success", "poison_threshold",
+                 "strict_probes", "instrument")
+                if key in config
+            }
+            body["probes"] = config.get("probes", [])
+            if config.get("restart"):
+                body["restart"] = config["restart"]
+        return body
+
     # -- serialisation ---------------------------------------------------- #
 
     def snapshot_dict(self, *, include_timings: bool = True,
-                      include_events: bool = False) -> dict:
+                      include_events: bool = False,
+                      include_config: bool = True) -> dict:
         s = self.snapshot()
         checks = {}
         for name, r in s.results.items():
@@ -428,6 +523,8 @@ class HealthMonitor:
                 entry["observed"] = dict(r.observed)
             entry["transitions"] = self.machine.transitions(name)
             entry["next_interval_s"] = round(self.machine.next_interval(name), 2)
+            if include_config:
+                entry["config"] = self.check_config(name)
             checks[name] = entry
 
         body = {

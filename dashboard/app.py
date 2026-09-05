@@ -43,6 +43,10 @@ class Fleet:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._latest: dict[str, dict] = {}
+        # Probe settings per worker. Fetched separately and rarely: this is
+        # configuration, not telemetry, and re-polling it every second would
+        # be a lot of bytes to learn nothing.
+        self._configs: dict[str, dict] = {}
         self._history: dict[str, deque] = {}
         self._transitions: deque = deque(maxlen=200)
         self._subscribers: list[queue.Queue] = []
@@ -53,6 +57,10 @@ class Fleet:
         with self._lock:
             self._subscribers.append(q)
         return q
+
+    def config_names(self) -> set:
+        with self._lock:
+            return set(self._configs)
 
     def unsubscribe(self, q) -> None:
         with self._lock:
@@ -119,10 +127,20 @@ class Fleet:
                 latest_transition = self._transitions[0]
             self._broadcast({"type": "transition", "transition": latest_transition})
 
+    def set_config(self, name: str, config: dict | None) -> None:
+        if config is None:
+            return
+        with self._lock:
+            changed = self._configs.get(name) != config
+            self._configs[name] = config
+        if changed:
+            self._broadcast({"type": "config", "worker": name, "config": config})
+
     def snapshot(self) -> dict:
         with self._lock:
             return {
                 "workers": list(self._latest.values()),
+                "configs": dict(self._configs),
                 "history": {k: list(v) for k, v in self._history.items()},
                 "transitions": list(self._transitions),
                 "seq": self._seq,
@@ -133,23 +151,41 @@ class Fleet:
 FLEET = Fleet()
 
 
+# How many health polls pass between configuration fetches. Settings change
+# only on a deploy, so this is generous on purpose.
+CONFIG_EVERY = int(os.getenv("CONFIG_EVERY", "60"))
+
+
+def fetch(url: str, timeout: float = 2.5):
+    """GET and parse JSON. Returns (body, error-name)."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as r:
+            return json.loads(r.read()), None
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read()), None
+        except Exception:
+            return None, f"HTTP {e.code}"
+    except Exception as exc:
+        return None, type(exc).__name__
+
+
 def poll_loop() -> None:
+    cycle = 0
     while True:
         started = time.monotonic()
         for name, url in WORKERS:
-            body, error = None, None
-            try:
-                req = urllib.request.Request(url.rstrip("/") + "/health")
-                with urllib.request.urlopen(req, timeout=2.5) as r:
-                    body = json.loads(r.read())
-            except urllib.error.HTTPError as e:
-                try:
-                    body = json.loads(e.read())
-                except Exception:
-                    error = f"HTTP {e.code}"
-            except Exception as exc:
-                error = type(exc).__name__
+            body, error = fetch(url.rstrip("/") + "/health")
             FLEET.update(name, url, body, error)
+
+            # Refetch settings on the first sight of a worker, on the slow
+            # cadence, and whenever one comes back -- a worker that restarted
+            # may have restarted onto a different configuration.
+            if body is not None and (cycle % CONFIG_EVERY == 0
+                                     or name not in FLEET.config_names()):
+                config, _ = fetch(url.rstrip("/") + "/config")
+                FLEET.set_config(name, config)
+        cycle += 1
         time.sleep(max(0.05, POLL_INTERVAL - (time.monotonic() - started)))
 
 

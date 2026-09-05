@@ -466,7 +466,8 @@ Endpoints:
 |---|---|
 | `/live` | Loop responsiveness only. Never 503s for a dependency. |
 | `/ready` | Full readiness. 503 on `starting` or `unready`. |
-| `/health` | Everything, including timing windows and recent events. |
+| `/health` | Everything, including timing windows, per-check settings and recent events. |
+| `/config` | The settings behind the verdicts: intervals, timeouts, thresholds, criticality, and which clients are instrumented. Redacted. |
 | `/metrics` | Prometheus exposition. |
 | `/events` | The last 50 structured events. |
 
@@ -541,6 +542,34 @@ Working as designed: the process is alive but cannot safely process work.
 The `reasons` array names the check and its category. Do **not** restart for
 a dependency fault — see the failure matrix in
 [OPERATIONS.md](OPERATIONS.md#failure-handling-matrix).
+
+### What settings is a check actually running on?
+
+```bash
+curl -s localhost:8080/config | jq '.checks.postgres'
+```
+
+```json
+{
+  "critical": true,
+  "enabled": true,
+  "interval_s": 15.0,
+  "timeout_s": 2.0,
+  "ttl_s": 32.0,
+  "failure_threshold": 3,
+  "success_threshold": 2,
+  "max_silence_s": 60.0,
+  "backoff_initial_s": 5.0,
+  "backoff_max_s": 60.0,
+  "check_class": "PostgresCheck",
+  "dependency": "postgres"
+}
+```
+
+Read off the running state machine rather than the config file, so it
+reflects anything changed at runtime. The same data is on the bundled
+dashboard under **Probe configuration**, and per check in `/health` under
+`checks.<name>.config`.
 
 ### A dependency shows `probed` when you expected `observed`
 

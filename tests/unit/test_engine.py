@@ -474,3 +474,92 @@ def test_snapshot_reads_are_thread_safe_under_concurrent_checks():
     finally:
         monitor.stop()
     assert not errors
+
+
+# -- configuration reporting --------------------------------------------------- #
+
+def test_check_config_reports_what_is_actually_in_force():
+    """Read off the state machine, not the config file.
+
+    Two sources of truth for a threshold is how a dashboard ends up
+    disagreeing with the behaviour it is describing.
+    """
+    monitor = _monitor()
+    monitor.register(FakeDependency("db"), name="db", critical=True,
+                     interval=7.0, timeout=1.5, ttl=20.0,
+                     failure_threshold=4, success_threshold=3, max_silence=45.0)
+
+    config = monitor.check_config("db")
+    assert config["critical"] is True and config["enabled"] is True
+    assert config["interval_s"] == 7.0 and config["timeout_s"] == 1.5
+    assert config["failure_threshold"] == 4 and config["success_threshold"] == 3
+    assert config["max_silence_s"] == 45.0 and config["ttl_s"] == 20.0
+    assert config["check_class"] == "FakeDependency"
+
+    # A runtime change is reflected immediately, because the spec IS the source.
+    monitor.set_enabled("db", False)
+    assert monitor.check_config("db")["enabled"] is False
+
+
+def test_describe_config_covers_every_registered_check():
+    monitor = _monitor()
+    monitor.register(FakeDependency("db"), name="db", critical=True, interval=1.0)
+    monitor.register(FakeDependency("cache"), name="cache", critical=False, interval=1.0)
+    Tracker(monitor, ProcessingState(), default_queue="billing.in")
+
+    described = monitor.describe_config()
+    assert set(described["checks"]) == {"db", "cache"}
+    assert described["queues"] == ["billing.in"]
+    assert described["service"] == "test-worker"
+    assert described["runner"] == "thread"
+
+
+def test_the_config_endpoint_serves_settings_without_credentials():
+    import urllib.request
+
+    health = setup_worker_health(
+        service="cfg-worker",
+        config={"worker_health": {
+            "health_host": "127.0.0.1", "health_port": 0, "boot_grace": 0,
+            "log_level": "WARNING", "processing_check": False,
+            "probes": [{
+                "type": "postgres", "name": "postgres", "critical": True,
+                "interval": 15, "timeout": 2,
+                # A DSN in the config is the realistic case, and the one that
+                # must never reach a response body.
+                "params": {"dsn": f"postgresql://app:{CANARY}@db:5432/app"},
+            }],
+        }},
+    )
+    try:
+        url = f"http://127.0.0.1:{health.server.port}/config"
+        with urllib.request.urlopen(url, timeout=3) as response:
+            assert response.status == 200
+            raw = response.read().decode()
+    finally:
+        health.stop()
+
+    assert CANARY not in raw
+    body = json.loads(raw)
+    assert body["checks"]["postgres"]["critical"] is True
+    assert body["checks"]["postgres"]["interval_s"] == 15.0
+    # The useful half of the DSN survives so an operator can see WHICH server.
+    assert "db:5432" in json.dumps(body["probes"])
+
+
+def test_ready_stays_lean_while_health_carries_the_settings():
+    """A supervisor polls /ready every couple of seconds; it does not need
+    the thresholds to decide whether to route traffic."""
+    monitor = _monitor()
+    monitor.register(FakeDependency("db"), name="db", critical=True,
+                     interval=0.1, timeout=1.0, ttl=30.0)
+    monitor.start(boot_grace=0)
+    try:
+        _wait(lambda: monitor.snapshot().results.get("db"), what="a result")
+        lean = monitor.snapshot_dict(include_timings=False, include_config=False)
+        full = monitor.snapshot_dict()
+    finally:
+        monitor.stop()
+
+    assert "config" not in lean["checks"]["db"]
+    assert full["checks"]["db"]["config"]["interval_s"] == 0.1

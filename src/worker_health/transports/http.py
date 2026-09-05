@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Paths served.  Anything else is a 404 with a hint, because the single
 # most common integration mistake is asking for /healthz or /readyz.
-ROUTES = ("/live", "/ready", "/health", "/metrics", "/events", "/")
+ROUTES = ("/live", "/ready", "/health", "/config", "/metrics", "/events", "/")
 
 
 def make_app(monitor):
@@ -61,10 +61,19 @@ def make_app(monitor):
                     "instance": monitor.instance,
                 })
             elif path == "/ready":
-                body = monitor.snapshot_dict(include_timings=False)
+                # Deliberately lean: a readiness probe runs every couple of
+                # seconds from a supervisor, and does not need the settings
+                # or the timing windows to decide whether to route traffic.
+                body = monitor.snapshot_dict(include_timings=False,
+                                             include_config=False)
                 self._send(monitor.ready_code(), body)
             elif path in ("/health", "/"):
                 self._send(200, monitor.snapshot_dict(include_events=True))
+            elif path == "/config":
+                # What the verdicts are being made with: intervals, timeouts,
+                # thresholds, criticality, and which clients are instrumented.
+                # Redacted -- a probe's params can hold a DSN.
+                self._send(200, monitor.describe_config())
             elif path == "/events":
                 self._send(200, {"events": monitor.events.recent(50)})
             elif path == "/metrics":

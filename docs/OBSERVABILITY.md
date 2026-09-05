@@ -7,6 +7,7 @@ Metrics, structured events, dashboards and alerts.
 - [Label cardinality](#label-cardinality)
 - [Structured events](#structured-events)
 - [Dashboard](#dashboard)
+- [Configuration reporting](#configuration-reporting)
 - [Alerts](#alerts)
 
 ---
@@ -219,6 +220,64 @@ normally"*, or *"reconcile cannot process work: postgres is failing — it
 accepted the connection but never answered"* — and carries a built-in "How to
 read this page" guide covering the four states, the three evidence levels and
 what each graph shows.
+
+---
+
+## Configuration reporting
+
+`GET /config` answers the question metrics cannot: **what settings is this
+worker making its decisions with?**
+
+```json
+{
+  "service": "billing-worker",
+  "instance": "billing-1",
+  "runner": "thread",
+  "boot_grace_s": 25,
+  "checks": {
+    "postgres": {
+      "critical": true, "enabled": true,
+      "interval_s": 15.0, "timeout_s": 2.0, "ttl_s": 32.0,
+      "failure_threshold": 3, "success_threshold": 2,
+      "max_silence_s": 60.0,
+      "backoff_initial_s": 5.0, "backoff_max_s": 60.0,
+      "check_class": "PostgresCheck", "dependency": "postgres"
+    }
+  },
+  "queues": ["billing.in"],
+  "instrumented": {"db_engine": "postgres", "redis_client": "redis"},
+  "source": "/app/workers/worker-health.yaml",
+  "probes": [ ... the declared specs, params redacted ... ]
+}
+```
+
+Three properties worth knowing:
+
+- **It reports what is in force, not what was written.** Every value is read
+  off the running state machine, so a check disabled with
+  `monitor.set_enabled(...)` shows as disabled here. Two sources of truth for
+  a threshold is how a dashboard ends up disagreeing with the behaviour it
+  describes.
+- **`instrumented` is the answer to the most common confusion.** If a check
+  reports `probed` when you expected `observed`, this map says whether its
+  client was ever instrumented.
+- **It is redacted.** Probe params can hold a DSN; the password is masked and
+  the host survives, because knowing *which* database is the point.
+
+The same per-check block appears in `/health` under `checks.<name>.config`.
+It is deliberately absent from `/ready`, which a supervisor polls every few
+seconds and which does not need thresholds to decide whether to route
+traffic.
+
+The bundled dashboard renders this as a **Probe configuration** panel:
+one row per check, every column captioned with what the setting does, and
+workers sharing a configuration grouped into one block — so a worker whose
+settings have drifted from the rest of the fleet appears as its own group.
+
+Like every other endpoint on this port, `/config` is unauthenticated. It
+exposes no credentials, but it does describe your topology — bind the health
+port to loopback or a private interface, as
+[OPERATIONS.md](OPERATIONS.md#security) says.
 
 ---
 

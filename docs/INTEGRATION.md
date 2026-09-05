@@ -125,7 +125,8 @@ callback.
 |---|---|
 | `/live` | Loop responsiveness only. Never 503s on a dependency failure. |
 | `/ready` | Full readiness. 503 on `starting` or `unready`; `degraded` stays 200. |
-| `/health` | Full snapshot: checks, processing, timing windows, recent events. |
+| `/health` | Full snapshot: checks, processing, timing windows, per-check settings, recent events. |
+| `/config` | The settings behind the verdicts: intervals, timeouts, thresholds, criticality, and which clients are instrumented. Redacted. |
 | `/metrics` | Prometheus exposition, bounded labels. |
 | `/events` | The last 50 structured events. |
 

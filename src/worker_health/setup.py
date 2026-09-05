@@ -178,6 +178,14 @@ def setup_worker_health(
                 extra={"service": config.service, "category": type(exc).__name__},
             )
 
+    # Reporting only: /config answers "what settings is this running on",
+    # which is the question a dashboard cannot otherwise answer.
+    monitor.attach_config(
+        config,
+        source=str(config_path) if config_path else os.getenv("WORKER_HEALTH_CONFIG"),
+        instrumented=instrumented,
+    )
+
     if start:
         monitor.start(boot_grace=config.boot_grace)
 

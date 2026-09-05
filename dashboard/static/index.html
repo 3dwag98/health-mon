@@ -162,6 +162,35 @@
     font-variant-numeric:tabular-nums;color:var(--ink-2)}
   table.deltas tr:first-child td{border-top:none}
 
+  /* Probe settings. A wide table, so it scrolls inside its own box rather
+     than making the whole page scroll sideways. */
+  .cfgwrap{overflow-x:auto;margin-top:10px}
+  table.cfg{width:100%;min-width:860px;border-collapse:collapse;font-size:12px}
+  table.cfg th{text-align:left;font-size:10.5px;text-transform:uppercase;
+    letter-spacing:.06em;color:var(--muted);font-weight:600;padding:7px 10px 7px 0;
+    border-bottom:1px solid var(--rule);white-space:nowrap;vertical-align:bottom}
+  table.cfg th .sub{display:block;text-transform:none;letter-spacing:0;
+    font-weight:400;font-size:10.5px;color:var(--muted);max-width:120px;
+    white-space:normal;line-height:1.3;margin-top:3px}
+  table.cfg td{padding:7px 10px 7px 0;border-top:1px solid var(--rule-soft);
+    vertical-align:top}
+  table.cfg td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;
+    color:var(--ink-2);white-space:nowrap}
+  table.cfg tr.wsep td{border-top:1px solid var(--rule);
+    padding-top:11px;font-weight:650}
+  table.cfg .wtag{font-size:11px;color:var(--muted);font-weight:400}
+  .tag{display:inline-block;font-size:10.5px;font-weight:650;letter-spacing:.03em;
+    text-transform:uppercase;padding:2px 6px;border-radius:3px;white-space:nowrap}
+  .tag.req{color:#a52c2c;background:var(--critical-bg)}
+  .tag.opt{color:var(--muted);background:var(--sunk)}
+  .tag.off{color:var(--muted);background:var(--sunk)}
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]) .tag.req{color:#ef8a8a}}
+  :root[data-theme="dark"] .tag.req{color:#ef8a8a}
+  .cfgsource{font-size:11.5px;color:var(--muted);margin-top:10px}
+  .cfgsource code{font-family:var(--mono);background:var(--sunk);padding:1px 4px;
+    border-radius:3px}
+
   /* The reading guide. Collapsed once dismissed, remembered per browser. */
   details.help{margin-top:22px;background:var(--surface);border:1px solid var(--rule);
     border-radius:6px;padding:0}
@@ -230,6 +259,21 @@
         gone wrong since this page loaded.</div></div>
     </div>
   </div>
+
+  <details class="help" id="cfg">
+    <summary>Probe configuration — what each check is set to</summary>
+    <div class="helpbody">
+      <p class="hint" style="margin:12px 0 0">These are the settings the
+        verdicts above are being made with, read from each worker's live
+        <code>/config</code> endpoint rather than from a file — so what you see
+        is what is actually in force. Credentials are redacted at the source;
+        no password or connection string reaches this page. To change any of
+        it, edit the worker's <code>worker-health.yaml</code> (or its Django
+        <code>WORKER_HEALTH</code> setting) and restart.</p>
+      <div class="cfgwrap" id="cfgtable"></div>
+      <div class="cfgsource" id="cfgsource"></div>
+    </div>
+  </details>
 
   <details class="help" id="help">
     <summary>How to read this page</summary>
@@ -302,7 +346,8 @@
 </div>
 
 <script>
-const S = { workers:{}, history:{}, transitions:[], connected:false, lastEvent:0 };
+const S = { workers:{}, history:{}, transitions:[], configs:{},
+            connected:false, lastEvent:0 };
 
 /* Categorical hues, assigned in fixed order and pinned to a dependency so a
    colour always means the same thing. Never cycled: an unknown check gets the
@@ -679,8 +724,108 @@ function renderTransitions(){
   }).join("");
 }
 
+/* Probe settings, one row per check, grouped by worker. Every column header
+   carries a one-line explanation of the setting -- a table of numbers whose
+   meaning lives in another document is a table nobody uses. */
+const CFG_COLUMNS = [
+  ["Check", "the dependency being watched"],
+  ["Required?", "does a failure here stop the worker"],
+  ["Every", "how often it runs when healthy"],
+  ["Timeout", "give up and call it a timeout after"],
+  ["Fails after", "consecutive failures before it reports failing"],
+  ["Recovers after", "consecutive successes before it reports ok again"],
+  ["Probe after", "silence before it stops trusting real traffic and probes"],
+  ["Stale after", "no result for this long and it reports 'no measurement'"],
+  ["Backoff", "while failing, retry interval grows to this"],
+];
+
+function renderConfig(){
+  const names = Object.keys(S.configs).sort();
+  const box = el("cfgtable"), source = el("cfgsource");
+  if (!names.length){
+    box.innerHTML = '<div class="empty">No configuration reported yet. '
+      + 'Workers publish it at /config once they are up.</div>';
+    source.innerHTML = ""; return;
+  }
+
+  const head = `<tr>${CFG_COLUMNS.map(([h, sub]) =>
+    `<th>${esc(h)}<span class="sub">${esc(sub)}</span></th>`).join("")}</tr>`;
+
+  /* Workers deployed from one config file have identical settings, and a
+     fleet of twenty would otherwise print the same table twenty times.
+     Grouping by settings collapses that to one -- and makes a worker whose
+     configuration has DRIFTED appear as its own group, which is the whole
+     diagnostic value of showing this at all. */
+  const groups = new Map();
+  names.forEach(worker => {
+    const cfg = S.configs[worker] || {};
+    const key = JSON.stringify([cfg.checks, cfg.runner, cfg.boot_grace_s]);
+    if (!groups.has(key)) groups.set(key, { cfg, workers: [] });
+    groups.get(key).workers.push(worker);
+  });
+
+  const rows = [...groups.values()].map(({ cfg, workers }) => {
+    const checks = cfg.checks || {};
+    const banner = `<tr class="wsep"><td colspan="${CFG_COLUMNS.length}">
+      ${workers.map(esc).join(", ")} <span class="wtag">· ${esc(cfg.runner||"?")} runner ·
+      boot grace ${esc(cfg.boot_grace_s ?? "?")}s ·
+      ${Object.keys(checks).length} ${plural(Object.keys(checks).length,"check")}${
+        workers.length > 1 ? " · identical settings" : ""}</span></td></tr>`;
+
+    const body = Object.entries(checks).map(([name, c]) => {
+      const purpose = CHECK_PURPOSE[name] || "A dependency this worker needs";
+      const tag = c.enabled === false
+        ? '<span class="tag off">off</span>'
+        : (c.critical ? '<span class="tag req">required</span>'
+                      : '<span class="tag opt">optional</span>');
+      return `<tr>
+        <td title="${esc(purpose)}"><b>${esc(name)}</b>${
+          c.check_class ? `<div class="wtag">${esc(c.check_class)}</div>` : ""}</td>
+        <td>${tag}</td>
+        <td class="num">${secs(c.interval_s)}</td>
+        <td class="num">${secs(c.timeout_s)}</td>
+        <td class="num">${esc(c.failure_threshold)}×</td>
+        <td class="num">${esc(c.success_threshold)}×</td>
+        <td class="num">${secs(c.max_silence_s)}</td>
+        <td class="num">${secs(c.ttl_s)}</td>
+        <td class="num">${secs(c.backoff_initial_s)} → ${secs(c.backoff_max_s)}</td>
+      </tr>`;
+    }).join("");
+    return banner + body;
+  }).join("");
+
+  box.innerHTML = `<table class="cfg"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+
+  /* Where the settings came from, and which clients are being watched --
+     the answer to "why does this check say probed when I expected observed".
+     Grouped the same way, so identical workers produce one line. */
+  const notes = new Map();
+  names.forEach(worker => {
+    const cfg = S.configs[worker] || {};
+    const wired = Object.values(cfg.instrumented || {});
+    const bits = [];
+    if (cfg.source) bits.push(`from <code>${esc(cfg.source)}</code>`);
+    bits.push(wired.length
+      ? `observing ${wired.map(esc).join(", ")} through auto-instrumentation`
+      : `no clients instrumented — every check falls back to probing`);
+    const line = bits.join(" · ");
+    if (!notes.has(line)) notes.set(line, []);
+    notes.get(line).push(worker);
+  });
+  source.innerHTML = [...notes.entries()]
+    .map(([line, ws]) => `<b>${ws.map(esc).join(", ")}</b>: ${line}`)
+    .join("<br>");
+}
+
+function secs(v){
+  if (v === null || v === undefined) return "—";
+  if (v < 1) return (v * 1000).toFixed(0) + " ms";
+  return (Number.isInteger(v) ? v : v.toFixed(1)) + " s";
+}
+
 function renderAll(){
-  renderVerdict(); renderKpis(); renderWorkers(); renderDeltas(); renderTransitions();
+  renderVerdict(); renderKpis(); renderWorkers(); renderDeltas();
+  renderTransitions(); renderConfig();
   const age = ((Date.now()/1000) - S.lastEvent);
   el("sub").textContent = S.connected
     ? `live · ${Object.keys(S.workers).length} workers · updated ${age<2?"just now":Math.round(age)+"s ago"}`
@@ -693,6 +838,9 @@ function applyEvent(ev){
     S.workers = {}; (ev.workers||[]).forEach(w => S.workers[w.name] = w);
     S.history = ev.history || {};
     S.transitions = ev.transitions || [];
+    S.configs = ev.configs || {};
+  } else if (ev.type === "config"){
+    S.configs[ev.worker] = ev.config;
   } else if (ev.type === "worker"){
     const w = ev.worker; S.workers[w.name] = w;
     const h = (S.history[w.name] = S.history[w.name] || []);
@@ -751,6 +899,14 @@ el("theme").onclick  = () => {
   if (!seen) help.open = true;
   help.addEventListener("toggle", () => {
     try { localStorage.setItem("wh-help-seen", help.open ? "" : "1"); } catch(_){}
+  });
+
+  // Settings are reference material, so this one remembers whatever the
+  // reader last chose and starts shut.
+  const cfg = el("cfg");
+  try { cfg.open = localStorage.getItem("wh-cfg-open") === "1"; } catch(_){}
+  cfg.addEventListener("toggle", () => {
+    try { localStorage.setItem("wh-cfg-open", cfg.open ? "1" : ""); } catch(_){}
   });
 })();
 
