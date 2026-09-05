@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Worker Health — Fleet</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%230ca30c'/%3E%3C/svg%3E">
 <style>
   :root {
     color-scheme: light;
@@ -12,6 +13,10 @@
     --accent:#0d6b75;
     --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
     --good-bg:#e6f4e6; --warning-bg:#fdf3dc; --serious-bg:#fbeee7; --critical-bg:#f9e5e5;
+    /* Categorical series hues, in fixed order. Validated: lightness band,
+       chroma floor, CVD separation and normal-vision floor all pass. The
+       contrast warning on s3/s4 is relieved by the label + value that sit
+       beside every sparkline -- identity is never carried by color alone. */
     --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
     --mono:"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;
   }
@@ -53,13 +58,28 @@
     font-size:13px;font-weight:550}
   #banner.on{display:block}
 
-  .fleetbar{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 6px}
-  .kpi{flex:1 1 170px;background:var(--surface);border:1px solid var(--rule);
+  /* The headline: one plain sentence saying what the fleet is doing.
+     Everything below it is the supporting detail for this sentence. */
+  .verdict{margin:18px 0 4px;padding:15px 18px;border-radius:6px;
+    background:var(--surface);border:1px solid var(--rule);
+    border-left:4px solid var(--muted)}
+  .verdict.ok{border-left-color:var(--good)}
+  .verdict.degraded{border-left-color:var(--warning)}
+  .verdict.failing{border-left-color:var(--critical)}
+  .verdict.starting{border-left-color:var(--serious)}
+  .verdict .headline{font-size:16px;font-weight:600;letter-spacing:-.01em}
+  .verdict .detail{color:var(--ink-2);font-size:13px;margin-top:5px}
+  .verdict .detail b{font-weight:600}
+
+  .fleetbar{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 6px}
+  .kpi{flex:1 1 190px;background:var(--surface);border:1px solid var(--rule);
     border-radius:5px;padding:12px 14px}
   .kpi .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
   .kpi .v{font-family:var(--mono);font-size:22px;font-weight:600;margin-top:5px;
     font-variant-numeric:tabular-nums;letter-spacing:-.02em}
   .kpi .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
+  /* Every tile says what it means. A number nobody can interpret is noise. */
+  .kpi .why{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.35}
 
   .worker{background:var(--surface);border:1px solid var(--rule);border-radius:6px;
     margin-top:14px;overflow:hidden}
@@ -72,6 +92,7 @@
   .whead.gone{border-left-color:var(--critical)}
   .wname{font-weight:650;font-size:15px}
   .wmeta{color:var(--muted);font-size:12px;font-family:var(--mono)}
+  .wsays{width:100%;color:var(--ink-2);font-size:12.5px;margin-top:-4px}
   .spacer{flex:1}
 
   .pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:650;
@@ -86,10 +107,8 @@
   .p-failing .dot{background:var(--critical)}
   .p-starting{color:#9b4a22;background:var(--serious-bg)}
   .p-starting .dot{background:var(--serious)}
-  .p-unknown{color:var(--muted);background:var(--sunk)}
-  .p-unknown .dot{background:var(--muted)}
-  /* Status text needs its own step on the dark ground; the status hues
-     themselves stay fixed, only the label ink is restepped. */
+  .p-unknown,.p-disabled{color:var(--muted);background:var(--sunk)}
+  .p-unknown .dot,.p-disabled .dot{background:var(--muted)}
   @media (prefers-color-scheme: dark){
     :root:not([data-theme="light"]) .p-ok{color:#7ad47a}
     :root:not([data-theme="light"]) .p-degraded{color:#f3c96a}
@@ -102,26 +121,31 @@
   :root[data-theme="dark"] .p-starting{color:#f0a583}
 
   .checks{border-top:1px solid var(--rule-soft)}
-  .crow{display:grid;grid-template-columns:130px 92px 92px 1fr 150px;gap:12px;
+  .crow,.chead{display:grid;grid-template-columns:168px 96px 88px 1fr 160px;gap:12px;
     align-items:center;padding:9px 16px;border-top:1px solid var(--rule-soft);font-size:12.5px}
-  .crow:first-child{border-top:none}
+  /* Column headers, so a reader never has to guess what a number is. */
+  .chead{border-top:none;background:var(--sunk);padding-top:7px;padding-bottom:7px;
+    font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+    font-weight:600}
   .cname{font-weight:600;display:flex;align-items:center;gap:7px}
   .swatch{width:3px;height:14px;border-radius:2px;flex:none}
   .cnum{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink-2);font-size:12px}
-  .cdetail{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;
+  .cwhy{color:var(--ink-2);font-size:12px;overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap}
+  .cwhy .code{color:var(--muted);font-family:var(--mono);font-size:11px}
   .evi{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;
     letter-spacing:.05em;color:var(--muted)}
   .evi.observed{color:var(--accent);font-weight:650}
-  svg.spark{display:block;width:150px;height:26px}
+  svg.spark{display:block;width:160px;height:26px}
 
   .grid2{display:grid;grid-template-columns:1fr 340px;gap:14px;margin-top:22px}
   @media (max-width:900px){.grid2{grid-template-columns:1fr}
-    .crow{grid-template-columns:1fr 1fr;row-gap:4px}}
+    .crow,.chead{grid-template-columns:1fr 1fr;row-gap:4px}
+    .chead{display:none}}
   .panel{background:var(--surface);border:1px solid var(--rule);border-radius:6px;
     padding:14px 16px}
   .panel h2{margin:0 0 3px;font-size:13px;font-weight:650}
-  .panel .hint{color:var(--muted);font-size:11.5px;margin:0 0 12px}
+  .panel .hint{color:var(--muted);font-size:11.5px;margin:0 0 12px;line-height:1.45}
   .tlog{max-height:340px;overflow-y:auto;font-size:12px}
   .tline{display:flex;gap:9px;padding:6px 0;border-top:1px solid var(--rule-soft);
     align-items:baseline}
@@ -137,6 +161,27 @@
   table.deltas td:last-child{text-align:right;font-family:var(--mono);
     font-variant-numeric:tabular-nums;color:var(--ink-2)}
   table.deltas tr:first-child td{border-top:none}
+
+  /* The reading guide. Collapsed once dismissed, remembered per browser. */
+  details.help{margin-top:22px;background:var(--surface);border:1px solid var(--rule);
+    border-radius:6px;padding:0}
+  details.help > summary{padding:13px 16px;cursor:pointer;font-size:13px;
+    font-weight:650;list-style:none}
+  details.help > summary::-webkit-details-marker{display:none}
+  details.help > summary::before{content:"▸ ";color:var(--muted)}
+  details.help[open] > summary::before{content:"▾ "}
+  details.help > summary:hover{color:var(--accent)}
+  .helpbody{padding:0 16px 16px;border-top:1px solid var(--rule-soft)}
+  .helpgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px;
+    margin-top:14px}
+  .helpgrid h3{margin:0 0 7px;font-size:12px;text-transform:uppercase;
+    letter-spacing:.06em;color:var(--muted);font-weight:650}
+  .helpgrid dl{margin:0;font-size:12.5px;line-height:1.5}
+  .helpgrid dt{font-weight:650;margin-top:8px}
+  .helpgrid dt:first-child{margin-top:0}
+  .helpgrid dd{margin:0 0 0 0;color:var(--ink-2)}
+  .helpgrid code{font-family:var(--mono);font-size:11.5px;background:var(--sunk);
+    padding:1px 4px;border-radius:3px}
 </style>
 </head>
 <body>
@@ -147,9 +192,9 @@
       <div class="sub" id="sub">connecting…</div>
     </div>
     <div class="controls">
-      <button id="idle">Pause load (idle-queue test)</button>
-      <button id="normal">Resume load</button>
-      <button id="burst">Burst 2000</button>
+      <button id="idle" title="Stop publishing messages. A quiet queue must stay green — that is the false-positive test.">Pause load</button>
+      <button id="normal" title="Resume publishing at 8 messages a second.">Resume load</button>
+      <button id="burst" title="Publish 2000 messages at once to build a backlog.">Burst 2000</button>
       <button id="theme">Theme</button>
     </div>
   </header>
@@ -157,46 +202,201 @@
   <div id="banner">Live stream disconnected — the values below are frozen and may
     not reflect the fleet. Reconnecting…</div>
 
+  <!-- The one sentence to read first. -->
+  <div class="verdict" id="verdict">
+    <div class="headline">Connecting…</div>
+    <div class="detail">Waiting for the first report from the fleet.</div>
+  </div>
+
   <div class="fleetbar" id="kpis"></div>
   <div id="workers"></div>
 
   <div class="grid2">
     <div class="panel">
-      <h2>Worker → health delta</h2>
-      <p class="hint">How old the worker's own signal already was when health last
-        looked at it. A check that runs in 2&nbsp;ms while standing on a 90-second-old
-        observation is not a fresh signal — this is the number that says so.</p>
+      <h2>How fresh is each worker's health signal?</h2>
+      <p class="hint">Each line is one worker over the last few minutes. It plots how
+        old the worker's own evidence already was at the moment health last looked at
+        it. <b>Low and flat is good.</b> A rising line means health is describing a
+        worker it has not heard from recently — the green light is going stale, even
+        if it still says green.</p>
       <div id="deltacharts"></div>
     </div>
     <div class="panel">
-      <h2>Status transitions</h2>
-      <p class="hint">Detection and recovery, as they happen.</p>
-      <div class="tlog" id="tlog"><div class="empty">No transitions yet.</div></div>
+      <h2>What changed, and when</h2>
+      <p class="hint">Every time a worker's overall verdict changed. This is where
+        detection and recovery show up: inject a fault and a line appears within a few
+        seconds; clear it and the recovery line follows.</p>
+      <div class="tlog" id="tlog"><div class="empty">No changes yet — nothing has
+        gone wrong since this page loaded.</div></div>
     </div>
   </div>
+
+  <details class="help" id="help">
+    <summary>How to read this page</summary>
+    <div class="helpbody">
+      <div class="helpgrid">
+        <div>
+          <h3>The four states</h3>
+          <dl>
+            <dt>ok</dt>
+            <dd>Processing normally. Everything it needs is reachable.</dd>
+            <dt>degraded</dt>
+            <dd>Still working, but something non-essential is broken — a cache, a
+              vendor API, low disk. Traffic keeps flowing here on purpose.</dd>
+            <dt>failing</dt>
+            <dd>Cannot safely process work. Something essential is down, or the worker
+              is stuck. This is the one to act on.</dd>
+            <dt>starting</dt>
+            <dd>Booting. Dependencies have not all answered yet. Normal for the first
+              20–30 seconds after a restart.</dd>
+          </dl>
+        </div>
+        <div>
+          <h3>The "how we know" column</h3>
+          <dl>
+            <dt>observed</dt>
+            <dd><b>Strongest.</b> The worker's own real queries and commands succeeded
+              just now. Nothing was faked to find out.</dd>
+            <dt>introspected</dt>
+            <dd>Read from the worker's own connection state — pool counters, consumer
+              registration — without sending anything.</dd>
+            <dt>probed</dt>
+            <dd><b>Weakest.</b> Nobody used this dependency recently, so health sent a
+              test request of its own. A probe proves the server answers; it does not
+              prove the worker's own connection works.</dd>
+          </dl>
+        </div>
+        <div>
+          <h3>The graphs</h3>
+          <dl>
+            <dt>Response time (per dependency row)</dt>
+            <dd>The last ~3 minutes of check latency for that one dependency. Watch for
+              a step change, not the absolute value — a flat line that suddenly climbs
+              is the early warning.</dd>
+            <dt>Signal freshness (bottom left)</dt>
+            <dd>How far behind the worker the health data is. Flat and low means the
+              verdict is current. Rising means it is getting old.</dd>
+            <dt>What changed (bottom right)</dt>
+            <dd>The state-change log. Silence here is good news.</dd>
+          </dl>
+        </div>
+        <div>
+          <h3>Worth trying</h3>
+          <dl>
+            <dt>Pause load</dt>
+            <dd>A worker with nothing to do must stay green. Any health system that
+              alerts on an idle queue gets ignored within a week — press this and
+              watch nothing happen.</dd>
+            <dt>Burst 2000</dt>
+            <dd>Builds a backlog. Queue depth climbs, the workers drain it, and the
+              "waiting in queue" tile falls back to zero.</dd>
+            <dt>Fault injection</dt>
+            <dd>Run a <code>docker compose exec toxiproxy</code> command from the
+              README and watch the "how we know" column flip from
+              <code>observed</code> to <code>probed</code>, then the state go red.</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </details>
 </div>
 
 <script>
 const S = { workers:{}, history:{}, transitions:[], connected:false, lastEvent:0 };
+
+/* Categorical hues, assigned in fixed order and pinned to a dependency so a
+   colour always means the same thing. Never cycled: an unknown check gets the
+   muted ink and is identified by its label, not by a generated hue. */
 const CHECK_COLOR = { postgres:"var(--s1)", redis:"var(--s2)",
-                      rabbitmq:"var(--s3)", processing:"var(--s4)" };
+                      "redis-cache":"var(--s2)", rabbitmq:"var(--s3)",
+                      processing:"var(--s4)" };
+
+/* Plain English for every vocabulary word the SDK can emit. Without this the
+   page is a wall of codes that only its author can read. */
+const CHECK_PURPOSE = {
+  postgres:      "The database this worker reads and writes",
+  "redis-cache": "The cache and lock store",
+  redis:         "The cache and lock store",
+  rabbitmq:      "The message queue it consumes from",
+  kafka:         "The Kafka topic it consumes from",
+  processing:    "Whether messages are actually being handled",
+  "worker-disk": "Free space on the worker's own disk",
+  "cache-drift": "Whether the cache still agrees with the database",
+  dns:           "Name resolution",
+};
+
+const STATE_MEANING = {
+  ok:       "working",
+  degraded: "working, but impaired",
+  failing:  "not working",
+  unknown:  "no recent measurement",
+  starting: "still booting",
+  disabled: "switched off in config",
+};
+
+const CATEGORY_MEANING = {
+  timeout:            "it accepted the connection but never answered",
+  connection_refused: "nothing is listening on that port",
+  connection_lost:    "the connection dropped mid-use",
+  protocol_error:     "it answered, but not in a language we speak",
+  auth_failed:        "the credentials were rejected",
+  resource_missing:   "the queue, table or name does not exist",
+  resource_locked:    "something else holds it exclusively",
+  config_drift:       "it is configured differently than expected",
+  dependency_version: "the client and server versions disagree",
+  pool_exhausted:     "this worker has no free connections left — the server is fine",
+  read_only:          "we were failed over onto a read-only replica",
+  heartbeat_timeout:  "the broker stopped hearing from us",
+  broker_alarm:       "the broker hit a memory or disk alarm and blocked us",
+  broker_shutdown:    "the broker closed the connection deliberately",
+  no_consumers:       "nothing is subscribed to this queue",
+  not_subscribed:     "connected, but not subscribed to anything",
+  not_consuming:      "messages are waiting and none are being taken",
+  credit_exhausted:   "every prefetch slot is held by an unacknowledged message",
+  backlog:            "the queue is deeper than the threshold",
+  memory_pressure:    "close to its memory limit; evictions are coming",
+  loading:            "still loading its dataset",
+  role_changed:       "this node changed primary/replica role",
+  stalled:            "messages arrive but none complete",
+  poison_loop:        "the same message keeps failing",
+  stale:              "the data behind this is too old to trust",
+  internal:           "the check itself raised an error",
+  unknown:            "cause not classified",
+};
+
+const EVIDENCE_MEANING = {
+  observed:      "from the worker's own real traffic",
+  introspected:  "read from local connection state",
+  probed:        "from a test request (no real traffic recently)",
+  none:          "no evidence yet",
+};
+
 const el = id => document.getElementById(id);
 const esc = s => String(s??"").replace(/[&<>"]/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 function pill(status, label){
   const s = status || "unknown";
-  return `<span class="pill p-${esc(s)}"><span class="dot"></span>${esc(label||s)}</span>`;
+  return `<span class="pill p-${esc(s)}" title="${esc(STATE_MEANING[s]||s)}">` +
+         `<span class="dot"></span>${esc(label||s)}</span>`;
 }
 function ms(v){
   if (v === null || v === undefined) return "—";
   return v >= 1000 ? (v/1000).toFixed(2)+" s" : v.toFixed(1)+" ms";
 }
+function ago(seconds){
+  if (seconds === null || seconds === undefined) return "—";
+  if (seconds < 60) return Math.round(seconds) + "s ago";
+  if (seconds < 3600) return Math.round(seconds/60) + "m ago";
+  return Math.round(seconds/3600) + "h ago";
+}
+function plural(n, one, many){ return n === 1 ? one : (many || one + "s"); }
 
 /* Sparkline: single series, 2px line, recessive baseline, emphasized endpoint.
    Small multiples rather than one multi-series chart, so identity comes from
-   the adjacent label and never from color alone. */
-function spark(points, color, w=150, h=26){
+   the adjacent label and never from color alone -- which is also what relieves
+   the contrast warning on the lighter two hues. */
+function spark(points, color, w=160, h=26, label=""){
   const vals = points.filter(v => typeof v === "number" && isFinite(v));
   if (vals.length < 2) return `<svg class="spark" viewBox="0 0 ${w} ${h}"></svg>`;
   const min = Math.min(...vals), max = Math.max(...vals);
@@ -205,8 +405,11 @@ function spark(points, color, w=150, h=26){
   const y = v => h-pad-((v-min)/span)*(h-2*pad);
   const d = vals.map((v,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
   const lx = x(vals.length-1).toFixed(1), ly = y(vals[vals.length-1]).toFixed(1);
-  return `<svg class="spark" viewBox="0 0 ${w} ${h}" role="img"
-      aria-label="last ${vals.length} samples, latest ${vals[vals.length-1].toFixed(1)}">
+  const last = vals[vals.length-1];
+  const title = `${label ? label+": " : ""}now ${last.toFixed(1)} ms, ` +
+                `range ${min.toFixed(1)}–${max.toFixed(1)} ms over the last ${vals.length} samples`;
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(title)}">
+    <title>${esc(title)}</title>
     <line x1="0" y1="${h-1}" x2="${w}" y2="${h-1}" stroke="var(--rule-soft)" stroke-width="1"/>
     <path d="${d}" fill="none" stroke="${color}" stroke-width="2"
       stroke-linejoin="round" stroke-linecap="round"/>
@@ -215,108 +418,272 @@ function spark(points, color, w=150, h=26){
   </svg>`;
 }
 
+/* -- the headline ---------------------------------------------------------- */
+
+function renderVerdict(){
+  const list = Object.values(S.workers);
+  const box = el("verdict");
+  if (!list.length){
+    box.className = "verdict";
+    box.innerHTML = `<div class="headline">Waiting for workers…</div>
+      <div class="detail">No worker has reported yet. If this persists, the
+      workers may still be starting — first boot takes a minute.</div>`;
+    return;
+  }
+
+  const unreachable = list.filter(w => !w.reachable);
+  const byState = s => list.filter(w => w.reachable && (w.body||{}).status === s);
+  const failing = byState("failing"), degraded = byState("degraded");
+  const starting = byState("starting"), ok = byState("ok");
+
+  let cls = "ok", headline, detail;
+
+  if (failing.length || unreachable.length){
+    cls = "failing";
+    const names = [...failing, ...unreachable].map(w => w.name);
+    headline = `${names.length} of ${list.length} ${plural(list.length, "worker")} ` +
+               `cannot process work right now.`;
+    detail = names.map(n => {
+      const w = S.workers[n];
+      if (!w.reachable) return `<b>${esc(n)}</b> is not answering (${esc(w.error||"no response")})`;
+      return `<b>${esc(n)}</b>: ` + (reasonsFor(w) || "a required dependency is failing");
+    }).join(" · ");
+  } else if (starting.length){
+    cls = "starting";
+    headline = `${starting.length} ${plural(starting.length, "worker")} still starting up.`;
+    detail = "Dependencies have not all answered yet. This is normal for the first "
+           + "20–30 seconds after a restart, and clears on its own.";
+  } else if (degraded.length){
+    cls = "degraded";
+    headline = `All ${list.length} workers are processing, ` +
+               `${degraded.length} with something broken.`;
+    detail = degraded.map(w =>
+      `<b>${esc(w.name)}</b>: ` + (reasonsFor(w) || "a non-essential dependency is down")
+    ).join(" · ") + " — traffic keeps flowing on purpose; nothing needs to be "
+                  + "restarted for this.";
+  } else {
+    const done = list.reduce((a,w) => a + queueStat(w, "succeeded"), 0);
+    headline = `All ${ok.length} ${plural(ok.length, "worker")} are processing normally.`;
+    detail = `${done.toLocaleString()} ${plural(done, "message")} completed so far. `
+           + `Every dependency is reachable and nothing is waiting unattended.`;
+  }
+
+  box.className = "verdict " + cls;
+  box.innerHTML = `<div class="headline">${headline}</div>
+                   <div class="detail">${detail}</div>`;
+}
+
+/* Prefer the SDK's own reasons array; fall back to reading the checks. */
+function reasonsFor(w){
+  const body = w.body || {};
+  if (Array.isArray(body.reasons) && body.reasons.length){
+    return body.reasons.map(r => esc(humanReason(r))).join("; ");
+  }
+  const broken = Object.entries(body.checks || {})
+    .filter(([, c]) => ["failing","degraded"].includes(c.internal_status));
+  if (!broken.length) return "";
+  return broken.map(([name, c]) => {
+    const why = CATEGORY_MEANING[c.category] || STATE_MEANING[c.internal_status];
+    return `${esc(name)} — ${esc(why)}`;
+  }).join("; ");
+}
+
+/* "critical check postgres is failing (connection_refused)"
+   -> "postgres is failing — nothing is listening on that port" */
+function humanReason(reason){
+  const m = /^(?:(critical|non-critical) )?check (\S+) is (\w+)(?: \((\w+)\))?/.exec(reason);
+  if (!m) return reason;
+  const [, , name, state, category] = m;
+  const why = CATEGORY_MEANING[category];
+  return `${name} is ${state}` + (why ? ` — ${why}` : "");
+}
+
+function queueStat(w, key){
+  const queues = (w.body || {}).processing || {};
+  return Object.values(queues).reduce((a, q) => a + (q[key] || 0), 0);
+}
+
+/* -- tiles ----------------------------------------------------------------- */
+
 function renderKpis(){
   const list = Object.values(S.workers);
   const total = list.length;
-  const up = list.filter(w => w.reachable && (w.body||{}).status === "ok").length;
-  const bad = list.filter(w => !w.reachable ||
+  const ready = list.filter(w => w.reachable &&
+    ["ok","degraded"].includes((w.body||{}).status)).length;
+  const attention = list.filter(w => !w.reachable ||
     ["failing","starting"].includes((w.body||{}).status)).length;
+
   const deltas = list.map(w => (w.body?.timing||{}).worker_to_health_delta_ms)
     .filter(v => typeof v === "number");
   const worst = deltas.length ? Math.max(...deltas) : null;
-  const depth = list.reduce((a,w) =>
-    a + ((w.body?.checks?.processing?.observed||{}).queue_depth || 0), 0);
-  const done = list.reduce((a,w) =>
-    a + ((w.body?.checks?.processing?.observed||{}).succeeded || 0), 0);
+
+  const depth = list.reduce((a,w) => a + queueStat(w, "queue_lag"), 0);
+  const done  = list.reduce((a,w) => a + queueStat(w, "succeeded"), 0);
+  const failed = list.reduce((a,w) => a + queueStat(w, "failed"), 0);
 
   el("kpis").innerHTML = [
-    ["Workers ready", `${up}<span class="u">/${total}</span>`],
-    ["Needing attention", String(bad)],
-    ["Worst worker→health delta", worst===null?"—":ms(worst)],
-    ["Queue depth (in)", String(depth)],
-    ["Messages completed", String(done)],
-  ].map(([k,v]) =>
-    `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`
+    ["Able to work", `${ready}<span class="u">/${total}</span>`,
+     "Workers that can accept and process messages right now."],
+    ["Need attention", String(attention),
+     "Workers that are failing, still booting, or not answering at all."],
+    ["Signal freshness", worst===null ? "—" : ms(worst),
+     "How stale the freshest evidence is. Small means these verdicts are current."],
+    ["Waiting in queue", depth.toLocaleString(),
+     "Messages published but not yet picked up by any worker."],
+    ["Completed", done.toLocaleString(),
+     failed ? `${failed.toLocaleString()} ${plural(failed,"message")} failed and were not retried.`
+            : "Messages handled successfully since the workers started."],
+  ].map(([k,v,why]) =>
+    `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${v}</div>
+     <div class="why">${esc(why)}</div></div>`
   ).join("");
 }
+
+/* -- per worker ------------------------------------------------------------ */
 
 function renderWorkers(){
   const names = Object.keys(S.workers).sort();
   el("workers").innerHTML = names.map(n => {
     const w = S.workers[n], b = w.body || {};
     const hist = S.history[n] || [];
+
     if (!w.reachable && !b.status){
       return `<div class="worker"><div class="whead gone">
         <span class="wname">${esc(n)}</span>
-        ${pill("failing","unreachable")}
-        <span class="wmeta">${esc(w.error||"no response")}</span></div></div>`;
+        ${pill("failing","not answering")}
+        <span class="wmeta">${esc(w.error||"no response")}</span>
+        <div class="wsays">The dashboard cannot reach this worker's health port.
+          The process may be down, or still starting.</div></div></div>`;
     }
+
     const t = b.timing || {};
+    const header = `<div class="chead">
+        <div>Dependency</div><div>State</div><div>Check time</div>
+        <div>How we know / what is wrong</div><div>Check time, last 3 min</div>
+      </div>`;
+
     const checks = Object.entries(b.checks || {}).map(([cn,c]) => {
       const color = CHECK_COLOR[cn] || "var(--muted)";
       const series = hist.map(p => p["lat:"+cn]);
-      return `<div class="crow">
-        <div class="cname"><span class="swatch" style="background:${color}"></span>${esc(cn)}
-          ${c.critical?"":'<span class="evi">opt</span>'}</div>
+      const purpose = CHECK_PURPOSE[cn] || "A dependency this worker needs";
+      const evidence = EVIDENCE_MEANING[c.evidence] || c.evidence;
+
+      let why;
+      if (["failing","degraded"].includes(c.internal_status)){
+        const cause = CATEGORY_MEANING[c.category] || c.detail || "cause not reported";
+        why = `${esc(cause)}${c.category ? ` <span class="code">${esc(c.category)}</span>` : ""}`;
+      } else {
+        const depth = c.observed && c.observed.queue_depth;
+        why = `<span class="evi ${esc(c.evidence)}">${esc(c.evidence)}</span> — ${esc(evidence)}`
+            + (depth !== undefined && depth !== null ? ` · ${depth} waiting` : "");
+      }
+
+      return `<div class="crow" title="${esc(purpose)}">
+        <div class="cname" title="${esc(purpose)}">
+          <span class="swatch" style="background:${color}"></span>${esc(cn)}
+          ${c.critical===false?'<span class="evi" title="A failure here degrades the worker but does not stop it">optional</span>':""}</div>
         <div>${pill(c.internal_status)}</div>
         <div class="cnum">${c.latency_ms!==undefined?ms(c.latency_ms):"—"}</div>
-        <div class="cdetail">
-          <span class="evi ${esc(c.evidence)}">${esc(c.evidence)}</span>
-          ${c.category?" · "+esc(c.category):""}${c.detail?" · "+esc(c.detail):""}
-          ${c.observed&&c.observed.queue_depth!==undefined?" · depth "+c.observed.queue_depth:""}
-        </div>
-        <div>${spark(series, color)}</div>
+        <div class="cwhy">${why}</div>
+        <div>${spark(series, color, 160, 26, cn)}</div>
       </div>`;
     }).join("");
+
+    const proc = Object.values(b.processing || {})[0] || {};
+    const says = workerSentence(b, proc);
 
     return `<div class="worker">
       <div class="whead ${esc(b.status||"unknown")}">
         <span class="wname">${esc(n)}</span>
         ${pill(b.status)}
-        ${b.live && b.live!=="ok" ? pill("failing","loop "+esc(b.live)) : ""}
+        ${b.liveness && b.liveness!=="alive" ? pill("failing","loop stuck") : ""}
         <span class="spacer"></span>
-        <span class="wmeta">up ${Math.round(b.uptime_s||0)}s ·
+        <span class="wmeta" title="Process uptime · which scheduler the monitor uses · how late its last tick was · how old its freshest evidence is">
+          up ${Math.round(b.uptime_s||0)}s ·
           ${esc((t.runner)||"—")} runner ·
           loop lag ${ms(t.loop_lag_ms)} ·
-          Δ ${ms(t.worker_to_health_delta_ms)}</span>
+          evidence ${ms(t.worker_to_health_delta_ms)}</span>
+        <div class="wsays">${says}</div>
       </div>
-      <div class="checks">${checks || '<div class="crow"><div class="cdetail">no checks</div></div>'}</div>
+      <div class="checks">${checks ? header + checks
+        : '<div class="crow"><div class="cwhy">no checks registered</div></div>'}</div>
     </div>`;
   }).join("") || '<div class="panel"><div class="empty">No workers reporting.</div></div>';
 }
 
+/* One plain sentence per worker, above its dependency table. */
+function workerSentence(b, proc){
+  const done = proc.succeeded || 0, waiting = proc.queue_lag;
+  const idle = proc.last_message_age_s;
+
+  if (b.status === "starting")
+    return "Starting up — waiting for its dependencies to answer for the first time.";
+
+  if (b.status === "failing"){
+    const reasons = reasonsFor({ body: b });
+    return "Cannot process work: " + (reasons || "a required dependency is failing") + ".";
+  }
+
+  let sentence;
+  if (b.status === "degraded"){
+    const reasons = reasonsFor({ body: b });
+    sentence = "Still processing, but impaired: " + (reasons || "a non-essential dependency is down") + ".";
+  } else if (idle !== undefined && idle !== null && idle > 30 && !waiting){
+    sentence = `Idle — nothing has arrived for ${ago(idle)}, and the queue is empty. `
+             + `That is healthy, not a fault.`;
+  } else {
+    sentence = `Processing normally.`;
+  }
+  const stats = [];
+  if (done) stats.push(`${done.toLocaleString()} done`);
+  if (waiting) stats.push(`${waiting.toLocaleString()} waiting`);
+  if (proc.failed) stats.push(`${proc.failed.toLocaleString()} failed`);
+  return sentence + (stats.length ? ` (${stats.join(", ")})` : "");
+}
+
+/* -- panels ---------------------------------------------------------------- */
+
 function renderDeltas(){
   const names = Object.keys(S.workers).sort();
+  if (!names.length){
+    el("deltacharts").innerHTML = '<div class="empty">No workers reporting yet.</div>';
+    return;
+  }
   el("deltacharts").innerHTML = `<table class="deltas">` + names.map(n => {
     const hist = (S.history[n]||[]).map(p => p.delta_ms);
     const last = hist.filter(v=>typeof v==="number").slice(-1)[0];
     return `<tr><td>${esc(n)}</td>
-      <td style="width:160px">${spark(hist, "var(--accent)")}</td>
+      <td style="width:170px">${spark(hist, "var(--accent)", 160, 26, n)}</td>
       <td>${ms(last)}</td></tr>`;
   }).join("") + `</table>
-  <div class="legend"><span><i style="background:var(--accent)"></i>evidence age at
-    last evaluation</span></div>`;
+  <div class="legend"><span><i style="background:var(--accent)"></i>age of the evidence
+    behind the verdict · lower is fresher</span></div>`;
 }
 
 function renderTransitions(){
   const box = el("tlog");
   if (!S.transitions.length){
-    box.innerHTML = '<div class="empty">No transitions yet.</div>'; return;
+    box.innerHTML = '<div class="empty">No changes yet — nothing has gone wrong '
+                  + 'since this page loaded.</div>';
+    return;
   }
-  box.innerHTML = S.transitions.slice(0,60).map(t => `
-    <div class="tline">
+  box.innerHTML = S.transitions.slice(0,60).map(t => {
+    const cause = (t.categories||[])
+      .map(c => CATEGORY_MEANING[c] || c)
+      .filter(Boolean)[0];
+    return `<div class="tline">
       <span class="tt">${new Date(t.t*1000).toLocaleTimeString()}</span>
-      <span><b>${esc(t.worker)}</b> ${esc(t.from)} → ${pill(t.to)}
-      ${t.categories&&t.categories.length?
-        '<span class="evi"> '+esc(t.categories.join(", "))+'</span>':""}</span>
-    </div>`).join("");
+      <span><b>${esc(t.worker)}</b> went from ${esc(t.from)} to ${pill(t.to)}
+      ${cause ? '<span class="evi"> — '+esc(cause)+'</span>' : ""}</span>
+    </div>`;
+  }).join("");
 }
 
 function renderAll(){
-  renderKpis(); renderWorkers(); renderDeltas(); renderTransitions();
+  renderVerdict(); renderKpis(); renderWorkers(); renderDeltas(); renderTransitions();
   const age = ((Date.now()/1000) - S.lastEvent);
   el("sub").textContent = S.connected
-    ? `live · ${Object.keys(S.workers).length} workers · last update ${age<2?"just now":Math.round(age)+"s ago"}`
+    ? `live · ${Object.keys(S.workers).length} workers · updated ${age<2?"just now":Math.round(age)+"s ago"}`
     : "reconnecting…";
 }
 
@@ -333,8 +700,8 @@ function applyEvent(ev){
     const point = { t: w.at, status: b.status,
       delta_ms: t.worker_to_health_delta_ms, loop_lag_ms: t.loop_lag_ms };
     Object.entries(b.checks||{}).forEach(([cn,c]) => point["lat:"+cn] = c.latency_ms);
-    const proc = (b.checks||{}).processing?.observed || {};
-    point.depth = proc.queue_depth; point.succeeded = proc.succeeded;
+    const proc = Object.values(b.processing || {})[0] || {};
+    point.depth = proc.queue_lag; point.succeeded = proc.succeeded;
     h.push(point); if (h.length > 180) h.shift();
   } else if (ev.type === "transition"){
     S.transitions.unshift(ev.transition);
@@ -370,7 +737,22 @@ el("theme").onclick  = () => {
   const next = cur === "dark" ? "light" : cur === "light" ? "dark"
     : (matchMedia("(prefers-color-scheme: dark)").matches ? "light" : "dark");
   document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("wh-theme", next); } catch(_){}
 };
+
+/* The guide is open the first time and stays shut once dismissed -- a reader
+   who already knows the vocabulary should not have to close it every visit. */
+(function restore(){
+  let seen = null, theme = null;
+  try { seen = localStorage.getItem("wh-help-seen");
+        theme = localStorage.getItem("wh-theme"); } catch(_){}
+  if (theme) document.documentElement.setAttribute("data-theme", theme);
+  const help = el("help");
+  if (!seen) help.open = true;
+  help.addEventListener("toggle", () => {
+    try { localStorage.setItem("wh-help-seen", help.open ? "" : "1"); } catch(_){}
+  });
+})();
 
 fetch("/api/fleet").then(r=>r.json()).then(d=>{
   applyEvent({type:"snapshot", ...d}); schedule();

@@ -92,8 +92,12 @@ class Fleet:
                 point["loop_lag_ms"] = timing.get("loop_lag_ms")
                 for cname, c in (body.get("checks") or {}).items():
                     point[f"lat:{cname}"] = c.get("latency_ms")
-                proc = (body.get("checks") or {}).get("processing", {}).get("observed", {})
-                point["depth"] = proc.get("queue_depth")
+                # Processing counters moved to their own top-level block when
+                # the SDK gained per-queue tracking; the first queue is the
+                # one this worker consumes.
+                queues = list((body.get("processing") or {}).values())
+                proc = queues[0] if queues else {}
+                point["depth"] = proc.get("queue_lag")
                 point["succeeded"] = proc.get("succeeded")
             hist.append(point)
 

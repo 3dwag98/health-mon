@@ -180,23 +180,45 @@ A sink that raises is swallowed — a broken exporter must never break health.
 Import [`deploy/grafana/worker-health-overview.json`](../deploy/grafana/worker-health-overview.json).
 Variables: `datasource`, `logs`, `service`, `instance`, `queue`, `check`.
 
-| Row | Panels |
-|---|---|
-| 1 · Fleet readiness | workers ready / alive, critical checks failing, worst evidence age, max loop lag, fleet status table |
-| 2 · Dependency grid | severity over time, instant grid (status · evidence · latency · category), latency, transition rate |
-| 3 · Throughput | messages/sec success and failure, failure ratio |
-| 4 · Queue lag and silence | queue lag, last-message vs last-success age |
-| 5 · Latency | handler p50/p95/p99, per-stage p95 |
-| 6 · Evidence freshness | worker→health delta, eval age, per-check evidence age |
-| 7 · Transitions | the `health_transition` event log |
+**One question per row**, and only the three you need during an incident are
+open by default. Every panel carries a `description`, which Grafana shows as
+an ⓘ in its header — so the explanation travels with the panel instead of
+living in a document nobody opens at 3am.
 
-Row 7 needs a Loki (or equivalent) datasource selected in the `logs`
-variable. Without a log pipeline, the same rows are available at each
+| Row | The question it answers | Open by default |
+|---|---|---|
+| Fleet status | Can my workers do their job right now? | yes |
+| Dependencies | If not, which dependency is at fault? | yes |
+| Message flow | Is work actually moving through them? | yes |
+| Latency detail | Why is it slow? | collapsed |
+| Evidence freshness | Can I trust what this dashboard says? | collapsed |
+| State changes | What changed, and when? | collapsed |
+
+The first panel of the first row is a text panel repeating that table plus the
+status vocabulary, so a reader who has never seen the dashboard can orient
+without leaving it.
+
+Two panels are worth knowing by name:
+
+- **Backlog vs silence** plots queue depth against time-since-last-message on
+  one chart. Neither is alarming alone — a deep queue with a busy consumer is
+  fine, and a silent consumer on an empty queue is fine. Both rising together
+  is the stuck consumer, and it is what `SilentConsumerWithBacklog` fires on.
+- **How far behind the worker is the health signal** is the freshness check on
+  the dashboard itself. If it climbs, every other panel is describing a worker
+  nobody has heard from recently.
+
+The state-change log needs a Loki (or equivalent) datasource selected in the
+`logs` variable. Without a log pipeline, the same events are available at each
 worker's `/events`.
 
 The repo also ships a zero-dependency live dashboard (`docker compose up -d`,
 then <http://localhost:9000>) that polls `/health` and streams to browsers
-over SSE.
+over SSE. It leads with one plain sentence — *"All 3 workers are processing
+normally"*, or *"reconcile cannot process work: postgres is failing — it
+accepted the connection but never answered"* — and carries a built-in "How to
+read this page" guide covering the four states, the three evidence levels and
+what each graph shows.
 
 ---
 

@@ -495,13 +495,22 @@ scrape_configs:
 
 **Grafana** — import
 [`deploy/grafana/worker-health-overview.json`](../deploy/grafana/worker-health-overview.json).
-Seven rows: fleet readiness, dependency grid, throughput, queue lag and
-silence, latency percentiles, evidence freshness, and the transition log.
-Variables: `service`, `instance`, `queue`, `check`.
+Six rows, one question each, and only the first three are open by default:
+fleet status, dependencies, message flow — then latency detail, evidence
+freshness and state changes, collapsed. Every panel has an ⓘ explaining what
+it measures and what a bad value looks like. Variables: `service`,
+`instance`, `queue`, `check`.
 
 **The bundled live dashboard** — `docker compose up -d` and open
-<http://localhost:9000>. It polls `/health` from every worker and streams
-to the browser over SSE; no Prometheus required.
+<http://localhost:9000>. It polls `/health` from every worker and streams to
+the browser over SSE; no Prometheus required.
+
+It is built to be readable without knowing the SDK: it opens with one plain
+sentence about the whole fleet, every tile says what its number means, each
+dependency row explains itself in words (*"nothing is listening on that
+port"* rather than `connection_refused`), and a "How to read this page" guide
+at the bottom covers the four states, the three evidence levels and what each
+graph shows.
 
 See [OBSERVABILITY.md](OBSERVABILITY.md) for the full metric reference.
 
