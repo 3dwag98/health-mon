@@ -45,6 +45,7 @@ guessing — install `worker-health[yaml]` if you need them.
 | `version` | `"0.0.0"` | Reported in `/health`. |
 | `health_host` | `"0.0.0.0"` | Bind address. Use `127.0.0.1` unless the port is published deliberately. |
 | `health_port` | `8080` | Health server port. `0` picks a free one. |
+| `health_port_search` | `0` | Ports to try above `health_port` when it is taken. `0` binds it or nothing, which is what a container with a published port wants; a host running several workers sets it. |
 | `serve_http` | `true` | Set false for a worker that only wants metrics and logs. |
 | `runner` | `"thread"` | `thread` for a blocking consume loop, `asyncio` for an event loop. |
 | `tick` | `0.2` | Scheduler cadence, seconds. |
@@ -66,7 +67,13 @@ guessing — install `worker-health[yaml]` if you need them.
 
 Django spellings (`ENABLED`, `PORT`, `HOST`, `SERVICE`, `DEFAULT_QUEUE`,
 `BOOT_GRACE`, `PROBES`, …) map onto the same fields. Django-only keys:
-`COMMANDS`, `DATABASES`, `CACHE_ALIAS`, `CACHE_DEPENDENCY`, `CONTEXT`.
+`COMMANDS`, `PORTS`, `DATABASES`, `CACHE_ALIAS`, `CACHE_DEPENDENCY`,
+`CONTEXT`, `ADOPT_HEALTH_CHECK_PLUGINS`, `HEALTH_CHECK_SKIP`.
+
+`instance` defaults to the supervisor's own ordinal when there is one
+(`NODE_APP_INSTANCE`, `PM2_INSTANCE_ID`, `pm_id`) and to `service-pid`
+otherwise — a pid changes on every restart, which turns a metric label into
+a new time series each time.
 
 ---
 

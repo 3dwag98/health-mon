@@ -31,6 +31,7 @@ class Event(str, Enum):
     # `observed`.
     WORKER_HEALTH_CONFIGURED = "worker_health_configured"
     WORKER_STOPPED = "worker_stopped"
+    WORKER_DRAINING = "worker_draining"
     BOOT_GRACE_STARTED = "boot_grace_started"
     BOOT_GRACE_COMPLETED = "boot_grace_completed"
     HEALTH_TRANSITION = "health_transition"

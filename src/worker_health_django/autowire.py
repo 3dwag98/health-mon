@@ -36,20 +36,44 @@ _SKIP_COMMANDS = frozenset({
     "dbshell", "createsuperuser", "test", "check", "showmigrations",
     "loaddata", "dumpdata", "compilemessages", "makemessages", "sqlmigrate",
     "diffsettings", "flush", "squashmigrations",
+    # Web entry points.  They are not workers, they run under an
+    # autoreloader that forks, and in production they are served by gunicorn
+    # or uvicorn rather than by manage.py at all.
+    "runserver", "runserver_plus", "testserver",
+    # Introspection commands, including this package's own.
+    "help", "version", "worker_health",
 })
+
+# argv flags that mean "this process will fork a child that does the work".
+_RELOADER_FLAGS = ("--reload", "--use-reloader", "--autoreload")
 
 
 def should_wire(config: Mapping[str, Any], argv: list[str] | None = None) -> bool:
-    """Decide whether THIS process should run a health monitor."""
+    """Decide whether THIS process should run a health monitor.
+
+    ``AppConfig.ready()`` fires for every management command, so this is the
+    guard between "a Django process started" and "a worker started".  It is
+    a guess made from ``sys.argv``, and the only reliable way out of guessing
+    is for the command itself to say so -- which is what
+    ``WorkerHealthCommand`` does, and why it is checked first.
+    """
     if not config.get("ENABLED", False):
         return False
 
     argv = sys.argv if argv is None else argv
     command = argv[1] if len(argv) > 1 else ""
 
-    # The autoreloader runs the real process as a child with
-    # RUN_MAIN=true; wiring in the parent as well would bind the port twice.
-    if os.environ.get("RUN_MAIN") == "false":
+    if command in _SKIP_COMMANDS or command.startswith("-"):
+        return False
+
+    if _is_reloader_parent(argv):
+        return False
+
+    if command_wires_itself(command):
+        # A WorkerHealthCommand starts its own monitor inside execute(), so
+        # that --health-port and the command's own class attributes are
+        # honoured.  Wiring here as well would bind a second port first and
+        # make both of those silently useless.
         return False
 
     allowed = config.get("COMMANDS")
@@ -58,7 +82,55 @@ def should_wire(config: Mapping[str, Any], argv: list[str] | None = None) -> boo
         # should reach for once they have more than one worker command.
         return command in set(allowed)
 
-    return command not in _SKIP_COMMANDS
+    return True
+
+
+def _is_reloader_parent(argv: list[str]) -> bool:
+    """True in the process that forked the worker rather than being it.
+
+    Django's autoreloader re-executes the command in a child with
+    ``RUN_MAIN=true`` set (``DJANGO_AUTORELOAD_ENV``); the parent has it
+    unset.  Wiring in both binds the port twice, and the child -- the one
+    doing the work -- is the one that loses the race.
+    """
+    if os.environ.get("RUN_MAIN") == "false":
+        return True
+    if os.environ.get(_autoreload_env()) == "true":
+        return False       # this IS the child; it does the work
+    return any(flag in argv for flag in _RELOADER_FLAGS)
+
+
+def _autoreload_env() -> str:
+    try:
+        from django.utils.autoreload import DJANGO_AUTORELOAD_ENV
+
+        return DJANGO_AUTORELOAD_ENV
+    except Exception:
+        return "RUN_MAIN"
+
+
+def command_wires_itself(command: str) -> bool:
+    """True when ``command`` is a ``WorkerHealthCommand`` subclass.
+
+    Loading the command class costs one import that Django is about to do
+    anyway, a few milliseconds after this returns.  Any failure means
+    "unknown", which falls back to the argv rules -- a broken third-party
+    command must not stop app startup.
+    """
+    if not command:
+        return False
+    try:
+        from django.core.management import get_commands, load_command_class
+
+        app = get_commands().get(command)
+        if not app or app.startswith("django."):
+            return False
+
+        from .commands import WorkerHealthCommand
+
+        return isinstance(load_command_class(app, command), WorkerHealthCommand)
+    except Exception:
+        return False
 
 
 def build_config(config: Mapping[str, Any]) -> HealthConfig:
@@ -107,7 +179,7 @@ def autowire(config: Mapping[str, Any]):
         instrument=True,
     )
 
-    _instrument_django(health.monitor, config)
+    instrument_django(health.monitor, config)
     _adopt_health_check_plugins(health.monitor, config)
     set_health_state(health)
     return health
@@ -140,7 +212,7 @@ def _adopt_health_check_plugins(monitor, config: Mapping[str, Any]) -> None:
         logger.exception("could not adopt django-health-check plugins")
 
 
-def _instrument_django(monitor, config: Mapping[str, Any]) -> None:
+def instrument_django(monitor, config: Mapping[str, Any]) -> None:
     from worker_health.instrument.django_ import (
         instrument_django_cache,
         instrument_django_db,

@@ -55,6 +55,20 @@ class ProcessingBinding:
         return data
 
 
+def _default_instance(service: str) -> str:
+    """A label that survives a restart where a pid does not.
+
+    Under PM2 the process id changes on every restart, which turns a metric
+    label into a new time series each time -- so prefer the supervisor's own
+    stable ordinal when there is one.
+    """
+    for var in ("NODE_APP_INSTANCE", "PM2_INSTANCE_ID", "pm_id"):
+        value = os.getenv(var, "")
+        if value.strip().isdigit():
+            return f"{service}-{value.strip()}"
+    return f"{service}-{os.getpid()}"
+
+
 class HealthMonitor:
     def __init__(
         self,
@@ -72,7 +86,7 @@ class HealthMonitor:
     ) -> None:
         self.service = service
         self.version = version
-        self.instance = instance or os.getenv("HEALTH_INSTANCE") or f"{service}-{os.getpid()}"
+        self.instance = instance or os.getenv("HEALTH_INSTANCE") or _default_instance(service)
         self.clock = clock or MonotonicClock()
         self.timings = Timings()
         self.traffic = TrafficLog()
@@ -104,6 +118,11 @@ class HealthMonitor:
         # exactly once rather than on every snapshot read.
         self._last_readiness: Readiness | None = None
         self._last_liveness: Liveness | None = None
+        self._draining = False
+        self._drain_reason: str = ""
+        # Set by setup_worker_health when this process is published to the
+        # host's run registry; removed again on stop().
+        self.run_record = None
 
         if runner == "asyncio":
             from .runners.asyncio_ import AsyncioRunner
@@ -187,6 +206,32 @@ class HealthMonitor:
         if boot_grace:
             self.events.emit(Event.BOOT_GRACE_STARTED, boot_grace_s=boot_grace)
         return self
+
+    def begin_shutdown(self, reason: str = "shutting down") -> None:
+        """Take this worker out of rotation without pretending it is dead.
+
+        A supervisor that sends SIGTERM expects the process to finish the
+        message in its hands and then exit.  Between those two moments the
+        worker is healthy and must not be given new work, which is exactly
+        the distinction ``/ready`` exists to carry: readiness goes to
+        ``unready`` (503) immediately while ``/live`` stays 200, so a
+        liveness probe does not escalate an orderly shutdown into a SIGKILL.
+
+        Idempotent: two signals in a row are one shutdown.
+        """
+        with self._lock:
+            if self._draining:
+                return
+            self._draining = True
+            self._drain_reason = reason
+        self.events.emit(Event.WORKER_DRAINING, detail=reason)
+        # Publish the readiness change now rather than waiting for the next
+        # tick; the whole value of draining is in the seconds it buys.
+        self.tick()
+
+    @property
+    def draining(self) -> bool:
+        return self._draining
 
     def stop(self, timeout: float = 5.0) -> None:
         """Idempotent -- tests stop the monitor and the fixture stops it again."""
@@ -279,10 +324,15 @@ class HealthMonitor:
         return Liveness.ALIVE if self.live_status() is Status.OK else Liveness.UNALIVE
 
     def readiness(self) -> Readiness:
+        if self._draining:
+            return Readiness.UNREADY
         return project_readiness(self._aggregate_status(), self.liveness())
 
     def readiness_reasons(self) -> tuple[str, ...]:
-        return reasons(self.machine, self.liveness())
+        out = reasons(self.machine, self.liveness())
+        if self._draining:
+            return (self._drain_reason,) + out
+        return out
 
     def loop_lag_ms(self) -> float:
         return round((self.clock.monotonic() - self._loop_beat) * 1000.0, 3)
@@ -339,8 +389,9 @@ class HealthMonitor:
             version=self.version,
             uptime_s=round(now - self._started_at, 2),
             timing=timing,
-            reasons=reasons(self.machine, liveness),
+            reasons=self.readiness_reasons(),
             processing=self._processing_block(now),
+            draining=self._draining,
         )
 
     def _processing_block(self, now: float) -> dict:
@@ -544,6 +595,8 @@ class HealthMonitor:
             "processing": dict(s.processing),
             "timing": dict(s.timing),
         }
+        if s.draining:
+            body["draining"] = True
         if s.reasons:
             body["reasons"] = list(s.reasons)
         if include_timings:

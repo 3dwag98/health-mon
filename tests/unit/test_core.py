@@ -190,10 +190,20 @@ def test_critical_failure_fails_the_whole():
     assert _agg(clock, specs, {"db": Status.FAILING, "cache": Status.OK}) is Status.FAILING
 
 
-def test_unknown_degrades_rather_than_fails():
+def test_a_critical_check_with_no_measurement_is_not_ready():
+    """Once boot grace is over, "we have never managed to ask" is not a
+    reason to route work here.  A check that has never answered, or whose
+    last answer aged past its ttl, reads the same from outside: nobody
+    knows, and nobody-knows is not ready."""
     clock = FakeClock()
     specs = [CheckSpec("db", critical=True)]
-    assert _agg(clock, specs, {"db": Status.UNKNOWN}) is Status.DEGRADED
+    assert _agg(clock, specs, {"db": Status.UNKNOWN}) is Status.FAILING
+
+
+def test_a_non_critical_check_with_no_measurement_only_degrades():
+    clock = FakeClock()
+    specs = [CheckSpec("cache", critical=False)]
+    assert _agg(clock, specs, {"cache": Status.UNKNOWN}) is Status.DEGRADED
 
 
 def test_boot_grace_reports_starting():

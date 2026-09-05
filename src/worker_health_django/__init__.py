@@ -37,5 +37,17 @@ from .state import get_health, get_monitor, get_tracker, set_health_state
 default_app_config = "worker_health_django.apps.WorkerHealthConfig"
 
 __all__ = ["get_health", "get_monitor", "get_tracker", "set_health_state",
-           "DjangoHealthCheckAdapter", "install_health_check_plugins",
-           "discover_backends", "default_app_config"]
+           "WorkerHealthCommand", "DjangoHealthCheckAdapter",
+           "install_health_check_plugins", "discover_backends",
+           "default_app_config"]
+
+
+def __getattr__(name):
+    # Imported lazily: this package is loaded from INSTALLED_APPS, and
+    # pulling django.core.management in at that moment is a needless
+    # ordering constraint for projects that never subclass the command.
+    if name == "WorkerHealthCommand":
+        from .commands import WorkerHealthCommand
+
+        return WorkerHealthCommand
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
