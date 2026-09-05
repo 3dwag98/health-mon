@@ -38,6 +38,7 @@ from .telemetry.events import Event
 from .telemetry.logs import configure
 from .track import Tracker
 from .transports import registry
+from .telemetry.otel import OTLPExporter
 from .transports.http import HealthServer
 
 
@@ -53,6 +54,7 @@ class WorkerHealth:
     server: HealthServer | None = None
     logger: Any = None
     instrumented: dict[str, str] = field(default_factory=dict)
+    exporter: OTLPExporter | None = None
 
     # The two calls a worker makes most often, forwarded so it does not have
     # to reach through .monitor for them.
@@ -65,6 +67,10 @@ class WorkerHealth:
 
     def stop(self, timeout: float = 5.0) -> None:
         self.monitor.stop(timeout=timeout)
+        # Stopped before the server so a final flush can still describe a
+        # worker that is on its way out.
+        if self.exporter is not None:
+            self.exporter.stop()
         if self.server is not None:
             self.server.stop()
         registry.unregister(getattr(self.monitor, "run_record", None))
@@ -110,11 +116,13 @@ def setup_worker_health(
     monitor = HealthMonitor(
         service=config.service,
         version=config.version,
+        environment=config.environment,
         instance=config.instance or None,
         runner=config.runner,
         tick=config.tick,
         max_workers=config.max_workers,
         loop_lag_threshold_ms=config.loop_lag_threshold_ms,
+        live_on_self_fault=config.live_on_self_fault,
         logger=logger,
     )
 
@@ -208,6 +216,21 @@ def setup_worker_health(
         instrumented=instrumented,
     )
 
+    # 6. OTLP export, off unless an endpoint was configured.
+    exporter = None
+    if config.otel_endpoint:
+        exporter = OTLPExporter(
+            monitor,
+            endpoint=config.otel_endpoint,
+            interval=config.otel_interval,
+            timeout=config.otel_timeout,
+            max_queue=config.otel_max_queue,
+            export_logs=config.otel_logs,
+        )
+        monitor.exporter = exporter
+        if start:
+            exporter.start()
+
     if start:
         monitor.start(boot_grace=config.boot_grace)
 
@@ -217,12 +240,13 @@ def setup_worker_health(
         probes=[s.name for s in specs],
         instrumented=sorted(instrumented.values()),
         queue=config.default_queue,
+        otel_endpoint=config.otel_endpoint or None,
     )
 
     return WorkerHealth(
         monitor=monitor, tracker=tracker, config=config, factory=factory,
         processing=processing, server=server, logger=logger,
-        instrumented=instrumented,
+        instrumented=instrumented, exporter=exporter,
     )
 
 

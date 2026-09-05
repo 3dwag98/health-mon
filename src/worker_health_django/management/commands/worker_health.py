@@ -33,8 +33,6 @@ class Command(BaseCommand):
         parser.add_argument("--list", action="store_true",
                             help="list registered workers and exit")
         parser.add_argument("--json", action="store_true", help="full snapshot as JSON")
-        parser.add_argument("--metrics", action="store_true",
-                            help="Prometheus exposition instead of JSON")
         parser.add_argument("--timeout", type=float, default=2.0)
 
     def handle(self, *args, **options):
@@ -64,11 +62,6 @@ class Command(BaseCommand):
         monitor = get_monitor()
         if monitor is not None:
             # Wired in THIS process: a command inspecting itself.
-            if options["metrics"]:
-                from worker_health.telemetry.prometheus import render
-
-                self.stdout.write(render(monitor))
-                return []
             return [("this process", monitor.snapshot_dict())]
 
         out = []
@@ -81,8 +74,7 @@ class Command(BaseCommand):
         return out
 
     def _fetch(self, base: str, options) -> dict | None:
-        path = "/metrics" if options["metrics"] else "/health"
-        url = base.rstrip("/") + path
+        url = base.rstrip("/") + "/health"
         try:
             with urllib.request.urlopen(url, timeout=options["timeout"]) as response:
                 raw = response.read()
@@ -92,9 +84,6 @@ class Command(BaseCommand):
             self.stderr.write(f"{base}: unreachable ({type(exc).__name__})")
             return None
 
-        if options["metrics"]:
-            self.stdout.write(raw.decode("utf-8", "replace"))
-            return None
         try:
             return json.loads(raw or b"{}")
         except ValueError:

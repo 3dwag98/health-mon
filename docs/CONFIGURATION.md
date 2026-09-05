@@ -40,18 +40,20 @@ guessing — install `worker-health[yaml]` if you need them.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `service` | `"worker"` | Service name. A metric label — keep it stable. |
+| `service` | `"worker"` | Service name. Becomes `service.name` on every pushed payload — keep it stable. |
 | `instance` | `$HEALTH_INSTANCE` or `service-pid` | Instance label. |
 | `version` | `"0.0.0"` | Reported in `/health`. |
+| `environment` | `""` | Which deployment this is. Becomes `deployment.environment.name` on every pushed payload, so one collector can serve staging and production. |
 | `health_host` | `"0.0.0.0"` | Bind address. Use `127.0.0.1` unless the port is published deliberately. |
 | `health_port` | `8080` | Health server port. `0` picks a free one. |
 | `health_port_search` | `0` | Ports to try above `health_port` when it is taken. `0` binds it or nothing, which is what a container with a published port wants; a host running several workers sets it. |
-| `serve_http` | `true` | Set false for a worker that only wants metrics and logs. |
+| `serve_http` | `true` | Set false for a worker that only wants pushed telemetry and logs. |
 | `runner` | `"thread"` | `thread` for a blocking consume loop, `asyncio` for an event loop. |
 | `tick` | `0.2` | Scheduler cadence, seconds. |
 | `boot_grace` | `30.0` | Seconds `starting` may last before checks are judged normally. |
 | `max_workers` | `8` | Check thread-pool size (thread runner). |
 | `loop_lag_threshold_ms` | `2000.0` | Above this, liveness reports `unalive`. |
+| `live_on_self_fault` | `true` | Whether a fault the process did to *itself* also fails `/live`. See below. |
 | `default_queue` | `"default"` | Queue label for `@handler` when none is given. |
 | `processing_check` | `true` | Register the processing check automatically. |
 | `max_idle` | `60.0` | Silence, in seconds, before an idle worker **with a backlog** is `not_consuming`. |
@@ -60,8 +62,13 @@ guessing — install `worker-health[yaml]` if you need them.
 | `log_level` | `"INFO"` | |
 | `configure_logging` | `true` | False leaves an app's existing logging alone. |
 | `instrument` | `true` | Auto-instrument clients found in the context. |
-| `strict_probes` | `true` | A malformed probe stops boot. False registers it as failing instead. |
+| `strict_probes` | `true` | A malformed probe stops boot. False registers it as a failing placeholder instead, so it is skipped but not invisible. |
 | `load_plugins` | `true` | Load `worker_health.probes` entry points. |
+| `otel_endpoint` | `""` | OTLP/HTTP base URL. Empty disables export entirely. |
+| `otel_interval` | `15.0` | Seconds between pushes. |
+| `otel_timeout` | `5.0` | Per-request timeout. |
+| `otel_max_queue` | `1000` | Bounded queue; when full, the oldest payload is dropped. |
+| `otel_logs` | `true` | Also push transition events as OTLP logs. |
 | `probes` | `[]` | See below. |
 | `restart` | `{}` | See below. |
 
@@ -85,16 +92,43 @@ a new time series each time.
   critical: true          # true → failing means unready
   enabled: true           # false → registered, reported `disabled`, never run
   interval: 15            # seconds between evaluations, when healthy
-  timeout: 2              # seconds before the evaluation is a timeout
+  timeout: 2              # optional; defaults to min(2, interval/2)
   failure_threshold: 3    # consecutive failures before status flips
   success_threshold: 2    # consecutive successes before recovery
   max_silence: 60         # seconds of no real traffic before probing
   ttl: 32                 # optional; defaults to interval*2 + timeout
+  latency_warn_ms: 150    # optional; slower than this degrades the check
+  latency_critical_ms: 500 # optional; slower than this fails it
+  pool_warn_ratio: 0.8    # optional; pool pressure, reported not alarmed
+  pool_critical_ratio: 1.0 # optional; at this fraction of capacity, degraded
+  stale_after_seconds: 30 # optional; silence this long WITH a backlog is a fault
+  backoff_initial: 5      # first interval after the check is confirmed failing
+  backoff_max: 60         # ceiling for that interval
+  backoff_multiplier: 2   # growth per consecutive failure; must be >= 1.0
+  backoff_jitter: 0.1     # spread, so a fleet does not retry in lockstep
   params: {}              # type-specific, see below
 ```
 
 Any key that is not a spec field is treated as a param, so the short form
 `url: https://…` works as well as `params: {url: …}`.
+
+These alternative spellings are accepted for the fields above, because
+config written against one naming convention should not silently become a
+param no builder reads:
+
+| Written | Means |
+|---|---|
+| `max_backoff_seconds`, `max_backoff` | `backoff_max` |
+| `backoff_initial_seconds` | `backoff_initial` |
+| `stale_after` | `stale_after_seconds` |
+| `latency_warning_ms` | `latency_warn_ms` |
+| `queue_name` (param) | `queue` |
+| `app_engine`, `db_engine` (param) | `engine` |
+
+`stale_after_seconds` is a spec-level name for a threshold each check type
+spells differently — it reaches the RabbitMQ check as `stale_after` and the
+processing check as `max_idle`. An explicit param always wins over it:
+someone who wrote the low-level spelling meant it.
 
 **`critical`** is the most consequential setting in the file:
 
@@ -111,10 +145,54 @@ marking it so converts a cache outage into a total outage.
 traffic is fresher than any probe and the probe never runs. Set it to a
 couple of multiples of your quiet-period length.
 
-**Backoff** is not per-probe configurable in YAML by design — the defaults
-(5s → 60s, ×2, 10% jitter) are what the guardrail against retry storms
-requires. They can be overridden per check in code via `monitor.register(...,
-backoff_initial=…, backoff_max=…, backoff_multiplier=…)`.
+**`timeout`** derives from `interval` when it is not set, as
+`min(2, interval/2)`. A fixed default is longer than any interval under two
+seconds, so a probe that tuned only its interval used to inherit a timeout it
+never chose and overlap every evaluation. Setting a timeout that is not
+shorter than the interval is refused outright: overlapping evaluations make a
+check quietly run at half its configured rate or worse, and nothing in the
+worker's output would ever say so.
+
+**Latency thresholds** are off unless set, because a bar the library picked
+for you is a pager that goes off about a threshold nobody chose. When set,
+they apply to every rung of the evidence ladder — a dependency judged healthy
+from real traffic is held to the same bar as one judged from a probe, since
+the two disagreeing about "fast enough" is how a worker reports OK on
+evidence a probe would have failed. Crossing `latency_warn_ms` is `degraded`
+with category `slow`; crossing `latency_critical_ms` is `failing`. Neither
+ever overwrites a real failure: `pool_exhausted` outranks `slow`, and they go
+to different teams.
+
+**Pool ratios** describe pressure on the *application's* connection pool,
+which is a different finding from the server being down and goes to a
+different team. `pool_critical_ratio` defaults to `1.0` — degraded only when
+the pool is completely full, which is what this did before the ratio was
+configurable. Lower it to catch exhaustion while a couple of slots remain;
+by the time it is total, work has already been waiting.
+`pool_warn_ratio` (0.9) sets a `pool_pressure` flag in `observed` without
+changing status, so it can be graphed without paging anyone.
+
+**`live_on_self_fault`** decides whether a wedged process fails `/live` as
+well as `/ready`. On by default: a worker holding a backlog it has stopped
+consuming, or looping on a poison message, is running and will stay that way
+forever, and `/live` is the only signal a supervisor watches. Dependency
+failures never move `/live` under any setting. See
+[OPERATIONS.md](OPERATIONS.md#what-live-answers) for the exact category list
+and why it is narrower than the restart policy's.
+
+**Backoff** is what keeps a failing dependency from being asked sixty times a
+minute — the retry storm guardrail — and it now takes its settings from the
+config file rather than only from `monitor.register(...)`. The defaults
+(5s → 60s, ×2, 10% jitter) suit a dependency that is cheap to ask; raise
+`backoff_initial` for one that is not. A `backoff_multiplier` below 1.0 is
+refused, because it would shrink the interval on every failure — exactly the
+storm backoff exists to prevent.
+
+While a check is backing off, its TTL widens to fit the interval actually in
+force. Without that, a check asked every 60s with a 5s TTL would age into
+`unknown` between evaluations, and a definitively failing dependency would
+report "no current measurement" — losing its category and the alert written
+against it, during the outage.
 
 ---
 
@@ -236,6 +314,10 @@ Any `HealthConfig` field can be set as `HEALTH_<FIELD>`:
 | `HEALTH_LOG_LEVEL` | `log_level` |
 | `HEALTH_MAX_IDLE` | `max_idle` |
 | `HEALTH_STRICT_PROBES` | `strict_probes` |
+| `HEALTH_OTEL_ENDPOINT` | `otel_endpoint` |
+| `HEALTH_OTEL_INTERVAL` | `otel_interval` |
+| `HEALTH_ENVIRONMENT` | `environment` |
+| `HEALTH_LIVE_ON_SELF_FAULT` | `live_on_self_fault` |
 | `WORKER_HEALTH_CONFIG` | path to the config file |
 
 A malformed value keeps the default rather than failing the boot — a typo in

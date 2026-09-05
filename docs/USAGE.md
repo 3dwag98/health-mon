@@ -471,7 +471,7 @@ The decorator detects coroutine functions and adapts; nothing else changes.
 
 ```python
 from worker_health_fastapi.routes import router
-app.include_router(router)      # /internal/live, /ready, /health, /metrics
+app.include_router(router)      # /internal/live, /ready, /health, /config
 ```
 
 These serve the same data from the event loop. The SDK's own threaded port
@@ -656,11 +656,10 @@ Endpoints:
 
 | Path | Purpose |
 |---|---|
-| `/live` | Loop responsiveness only. Never 503s for a dependency. |
+| `/live` | Is this process wedged? Loop lag, or a fault it did to itself. Never 503s for a dependency. |
 | `/ready` | Full readiness. 503 on `starting` or `unready`. |
 | `/health` | Everything, including timing windows, per-check settings and recent events. |
 | `/config` | The settings behind the verdicts: intervals, timeouts, thresholds, criticality, and which clients are instrumented. Redacted. |
-| `/metrics` | Prometheus exposition. |
 | `/events` | The last 50 structured events. |
 
 And from a shell or a PM2 healthcheck:
@@ -675,28 +674,32 @@ worker-health --url http://127.0.0.1:8080 --json
 
 ## 6. Dashboards
 
-**Prometheus** — [`deploy/prometheus/prometheus.yml`](../deploy/prometheus/prometheus.yml)
-and [`alerts.yml`](../deploy/prometheus/alerts.yml):
+**OTLP push** — set one endpoint and the worker pushes metrics and
+transition events to it:
 
 ```yaml
-scrape_configs:
-  - job_name: worker-health
-    metrics_path: /metrics
-    static_configs:
-      - targets: [billing-worker:8080, notify-worker:8080]
+worker_health:
+  otel_endpoint: http://otel-collector:4318
+  otel_interval: 15.0
 ```
 
-**Grafana** — import
-[`deploy/grafana/worker-health-overview.json`](../deploy/grafana/worker-health-overview.json).
-Six rows, one question each, and only the first three are open by default:
-fleet status, dependencies, message flow — then latency detail, evidence
-freshness and state changes, collapsed. Every panel has an ⓘ explaining what
-it measures and what a bad value looks like. Variables: `service`,
-`instance`, `queue`, `check`.
+There is no scrape endpoint. A supervised fleet has no stable scrape targets,
+so the worker pushes to a URL it is told about instead of waiting to be
+found. Export is bounded, off-thread and silent; its counters appear under
+`export` on `/health`, which is where you look when a collector goes quiet.
+See [OBSERVABILITY.md](OBSERVABILITY.md) for the metric reference and the
+alert rules.
 
-**The bundled live dashboard** — `docker compose up -d` and open
-<http://localhost:9000>. It polls `/health` from every worker and streams to
-the browser over SSE; no Prometheus required.
+The compose stack runs a collector at `docker/otel-collector.yaml` so the
+push path is exercised end to end; `docker compose logs otel-collector` shows
+what arrives.
+
+**The bundled fleet dashboard** — `docker compose up -d` and open
+<http://localhost:9000>. It receives the workers' OTLP push (so workers are
+discovered rather than configured), polls `/health` for the addresses it
+knows, and streams to the browser over SSE. It groups a shared dependency
+failure into one row instead of one row per sick worker, and flags workers
+that are alive but not consuming. No backend required.
 
 It is built to be readable without knowing the SDK: it opens with one plain
 sentence about the whole fleet, every tile says what its number means, each
@@ -716,7 +719,7 @@ See [OBSERVABILITY.md](OBSERVABILITY.md) for the full metric reference.
 Look at, in this order:
 
 ```
-/live                                    → is the loop turning?
+/live                                    → is this process wedged?
 /ready → reasons                         → what does the SDK think is wrong?
 processing.<queue>.queue_lag             → is there work waiting?
 processing.<queue>.last_message_age_s    → how long has it been silent?

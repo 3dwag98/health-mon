@@ -45,6 +45,12 @@ worker_health:
       failure_threshold: 2
       success_threshold: 2
       max_silence: 6
+      # A database answering in 400ms is not down, and calling it OK is how
+      # a worker keeps taking work it cannot finish in time.  Generous on
+      # purpose: a threshold that fires under normal load teaches its team
+      # to ignore it.
+      latency_warn_ms: ${PG_LATENCY_WARN_MS:-250}
+      latency_critical_ms: ${PG_LATENCY_CRITICAL_MS:-2000}
       params:
         engine: "@db_engine"
         probe_dsn: "@probe_dsn"
@@ -60,6 +66,10 @@ worker_health:
       failure_threshold: 2
       success_threshold: 2
       max_silence: 6
+      # Redis is on the hot path for the idempotency lock, so slowness here
+      # is felt immediately even though its loss is survivable.
+      latency_warn_ms: ${RD_LATENCY_WARN_MS:-120}
+      latency_critical_ms: ${RD_LATENCY_CRITICAL_MS:-1500}
       params:
         client: "@redis_client"
 
@@ -70,7 +80,9 @@ worker_health:
       name: rabbitmq
       critical: true
       interval: 2
-      timeout: 2
+      # Introspective: it reads local connection state and issues no I/O, so
+      # it has no business taking anywhere near a second.
+      timeout: 1
       failure_threshold: 2
       success_threshold: 2
       params:

@@ -29,7 +29,7 @@ from worker_health.checks.base import BaseCheck
 from worker_health.core.aggregate import readiness, reasons
 from worker_health.core.machine import CheckSpec, StateMachine
 from worker_health.core.model import CheckResult
-from worker_health.telemetry.prometheus import render
+from worker_health.telemetry.otel import build_metrics
 
 pytestmark = pytest.mark.unit
 
@@ -286,7 +286,31 @@ def test_an_async_handler_is_detected_and_wrapped():
 
 # -- telemetry ---------------------------------------------------------------- #
 
-def test_metrics_expose_both_the_binary_and_severity_families():
+def _otlp_names(payload) -> dict:
+    """Flatten one ExportMetricsServiceRequest to {metric name: metric}."""
+    out = {}
+    for resource in payload["resourceMetrics"]:
+        for scope in resource["scopeMetrics"]:
+            for metric in scope["metrics"]:
+                out[metric["name"]] = metric
+    return out
+
+
+def _otlp_points(metric) -> list:
+    return (metric.get("gauge") or metric.get("sum"))["dataPoints"]
+
+
+def _otlp_attr_keys(payload) -> set:
+    keys = set()
+    for resource in payload["resourceMetrics"]:
+        for scope in resource["scopeMetrics"]:
+            for metric in scope["metrics"]:
+                for point in _otlp_points(metric):
+                    keys.update(kv["key"] for kv in point.get("attributes", []))
+    return keys
+
+
+def test_otlp_payload_carries_both_the_binary_and_severity_families():
     monitor = _monitor()
     monitor.register(FakeDependency("db"), name="db", critical=True,
                      interval=0.1, timeout=1.0, ttl=30.0)
@@ -294,43 +318,55 @@ def test_metrics_expose_both_the_binary_and_severity_families():
     monitor.start(boot_grace=0)
     try:
         _wait(lambda: monitor.snapshot().results.get("db"), what="a result")
-        text = render(monitor)
+        payload = build_metrics(monitor)
     finally:
         monitor.stop()
 
+    metrics = _otlp_names(payload)
     for metric in ("worker_health_ready", "worker_health_live",
                    "worker_health_status", "worker_health_readiness_state",
                    "worker_health_check_status", "worker_health_check_severity",
                    "worker_health_check_latency_ms",
-                   "worker_health_check_evidence_age_ms",
                    "worker_health_check_transitions_total",
                    "worker_health_message_received_total",
                    "worker_health_message_success_total",
-                   "worker_health_message_failure_total",
-                   "worker_health_loop_lag_ms"):
-        assert f"{metric}{{" in text, metric
+                   "worker_health_message_failure_total"):
+        assert metric in metrics, metric
 
-    assert 'critical="true"' in text
-    assert 'queue="billing.in"' in text
+    # The counter families must declare themselves cumulative and monotonic,
+    # or a backend reads a process restart as a huge negative rate.
+    transitions = metrics["worker_health_check_transitions_total"]
+    assert transitions["sum"]["isMonotonic"] is True
+    assert transitions["sum"]["aggregationTemporality"] == 2
+
+    resource = payload["resourceMetrics"][0]["resource"]["attributes"]
+    assert {kv["key"] for kv in resource} == {
+        "service.name", "service.instance.id", "service.version",
+        "worker_health.runner"}
+
+    attrs = _otlp_attr_keys(payload)
+    assert "critical" in attrs and "queue" in attrs
 
 
-def test_metric_labels_are_bounded_and_carry_no_secrets():
+def test_otlp_payload_is_json_serialisable_and_bounded():
     monitor = _monitor()
     monitor.register(FakeDependency("db", mode="failed"), name="db", critical=True,
                      interval=0.1, timeout=1.0, failure_threshold=1, ttl=30.0)
     monitor.start(boot_grace=0)
     try:
         _wait(lambda: monitor.snapshot().results.get("db"), what="a result")
-        text = render(monitor)
+        payload = build_metrics(monitor)
     finally:
         monitor.stop()
 
+    # The exporter posts JSON; a payload that cannot be encoded is a silent
+    # total loss of telemetry, so prove it round-trips.
+    text = json.dumps(payload)
     assert CANARY not in text
-    allowed = {"service", "instance", "check", "critical", "evidence", "category",
-               "state", "queue", "quantile", "metric", "stat", "kind"}
-    import re
-    for name in re.findall(r"[{,]([a-z_]+)=\"", text):
-        assert name in allowed, name
+
+    allowed = {"check", "critical", "evidence", "category",
+               "state", "queue", "quantile", "metric", "stat"}
+    assert _otlp_attr_keys(payload) <= allowed, _otlp_attr_keys(payload) - allowed
 
 
 def test_transitions_and_readiness_changes_are_emitted_once_each():
@@ -414,7 +450,7 @@ def test_the_http_endpoints_answer_with_the_right_codes():
             "log_level": "WARNING", "processing_check": False,
         }},
         probes=[{"type": "function", "name": "gate", "critical": True,
-                 "interval": 0.2, "timeout": 1, "failure_threshold": 1,
+                 "interval": 0.2, "timeout": 0.1, "failure_threshold": 1,
                  "params": {"fn": "@gate"}}],
         context={"gate": lambda: _GATE["ok"]},
     )
@@ -441,9 +477,10 @@ def test_the_http_endpoints_answer_with_the_right_codes():
         assert payload["readiness"] == "unready"
         assert any("gate" in reason for reason in payload["reasons"])
 
-        code, metrics = get("/metrics")
-        assert code == 200 and b"worker_health_ready" in metrics
         assert json.loads(get("/health")[1])["service"] == "http-worker"
+        # /metrics is gone; asking for it must 404 like any other unknown
+        # path rather than hanging or 500ing.
+        assert get("/metrics")[0] == 404
         assert get("/nope")[0] == 404
     finally:
         _GATE["ok"] = True
@@ -467,7 +504,7 @@ def test_snapshot_reads_are_thread_safe_under_concurrent_checks():
         for _ in range(200):
             try:
                 monitor.snapshot_dict()
-                render(monitor)
+                build_metrics(monitor)
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 

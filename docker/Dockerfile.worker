@@ -25,6 +25,12 @@ RUN pip install --no-cache-dir -e ".[all]"
 
 COPY workers/ ./workers/
 COPY tests/ ./tests/
+# The system tier asserts the shipped PM2 example still health-checks /live,
+# so the reference config has to be in the image with it.
+COPY docs/ecosystem.config.js ./docs/ecosystem.config.js
+# The dashboard's OTLP decoding is tested against the SDK's own encoder, so
+# the aggregator has to be importable from the test image too.
+COPY dashboard/ ./dashboard/
 
 WORKDIR /app/workers
 EXPOSE 8080

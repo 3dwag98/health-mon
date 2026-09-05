@@ -26,12 +26,18 @@ class PostgresCheck(BaseCheck):
         name: str = "postgres",
         dependency: str = "postgres",
         pool_warn_ratio: float = 0.9,
+        pool_critical_ratio: float = 1.0,
     ) -> None:
         self.name = name
         self.dependency = dependency
         self._app_engine = app_engine
         self._probe_dsn = probe_dsn
         self._pool_warn_ratio = pool_warn_ratio
+        # 1.0 means "only when the pool is completely full", which is the
+        # behaviour this had before the ratio was configurable.  Lower it to
+        # catch exhaustion while there are still a couple of slots left --
+        # by the time it is total, work has already been waiting.
+        self._pool_critical_ratio = pool_critical_ratio
         self._probe_engine = None
 
     # -- introspection: zero I/O ---------------------------------------- #
@@ -55,16 +61,19 @@ class PostgresCheck(BaseCheck):
             "pool_overflow": overflow,
             "pool_capacity": capacity,
         }
-        if capacity > 0 and checked_out >= capacity:
+        if capacity > 0 and checked_out >= capacity * self._pool_critical_ratio:
             # The application cannot get a connection.  The SERVER is very
             # probably fine -- reporting connection_refused here is what
             # sends on-call to the wrong team.
+            observed["pool_critical_ratio"] = self._pool_critical_ratio
             return self.degraded(
                 ctx, ErrorCategory.POOL_EXHAUSTED, started,
-                detail="application pool has no free slots", **observed,
+                detail="application pool is at or above its critical ratio",
+                **observed,
             )
         if capacity > 0 and checked_out >= capacity * self._pool_warn_ratio:
             observed["pool_pressure"] = True
+            observed["pool_warn_ratio"] = self._pool_warn_ratio
         return self.ok(ctx, started, evidence=Evidence.INTROSPECTED, **observed)
 
     # -- probe: only when traffic is stale ------------------------------ #

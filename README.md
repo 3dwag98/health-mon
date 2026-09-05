@@ -31,7 +31,7 @@ def handle(message: dict):
 ```
 
 That is the whole change to worker code. It gets you `/live`, `/ready`,
-`/health`, `/metrics`, `/events`, structured JSON logs, dependency checks
+`/health`, `/config`, `/events`, structured JSON logs, dependency checks
 backed by real traffic, processing health, custom probes and dashboard
 metrics — with no per-query wrapping anywhere.
 
@@ -46,7 +46,7 @@ one `lifespan=` argument. See [docs/USAGE.md](docs/USAGE.md).
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The same structures as Mermaid source, plus module layout and deployment |
 | [docs/USAGE.md](docs/USAGE.md) | Step-by-step guides: generic worker, Django, FastAPI, custom probes, troubleshooting |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every setting, every probe type and its params |
-| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Metric reference, structured events, Grafana dashboard, alert rules |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | OTLP export, metric reference, structured events, alert rules |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Failure matrix, backoff and recovery, restart policy, PM2, security |
 | [docs/INTEGRATION.md](docs/INTEGRATION.md) | The short version of the above |
 | [docs/PRIOR-ART.md](docs/PRIOR-ART.md) | What django-health-check, fastapi-health and the Celery probes do, where this differs, and which of those differences came from reading them |
@@ -87,9 +87,9 @@ the boot grace working, not a failure.
 curl http://localhost:8081/health     # billing
 curl http://localhost:8082/health     # notify
 curl http://localhost:8083/health     # reconcile
-curl http://localhost:8081/metrics    # prometheus exposition
+curl http://localhost:8081/config     # what the verdicts are made with
 curl http://localhost:8081/ready      # 200 or 503, the readiness verdict
-curl http://localhost:8081/live       # loop responsiveness only
+curl http://localhost:8081/live       # is this process wedged?
 curl http://localhost:8081/events     # the last 50 structured events
 ```
 
@@ -323,7 +323,8 @@ points under `worker_health.probes`; `factory.load_plugins()` finds them with
 no import from this package.
 
 See `workers/` for three complete workers, `examples/` for Django and FastAPI
-ones, `deploy/` for Prometheus rules and a Grafana dashboard, and `docs/` for
+ones, `docker/otel-collector.yaml` for the OTLP receiver the stack pushes to,
+`dashboard/` for the fleet board that receives the fan-out, and `docs/` for
 the PM2 example.
 
 ## Versions

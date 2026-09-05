@@ -39,6 +39,10 @@ class HealthConfig:
     service: str = "worker"
     instance: str = ""
     version: str = "0.0.0"
+    # Which deployment this is.  Carried on every pushed payload so one
+    # collector can serve staging and production without the two blurring
+    # into a single fleet view.
+    environment: str = ""
 
     # transport
     health_host: str = "0.0.0.0"
@@ -56,6 +60,10 @@ class HealthConfig:
     boot_grace: float = 30.0
     max_workers: int = 8
     loop_lag_threshold_ms: float = 2000.0
+    # Whether a fault this process did to ITSELF -- a backlog it stopped
+    # consuming, a poison loop, a subscription that went away -- makes /live
+    # fail so a supervisor restarts it.  Dependency failures never do.
+    live_on_self_fault: bool = True
 
     # processing
     default_queue: str = "default"
@@ -63,6 +71,15 @@ class HealthConfig:
     max_idle: float = 60.0
     max_since_success: float = 120.0
     poison_threshold: int = 10
+
+    # telemetry.  An empty endpoint means "do not export", which is the
+    # default: a worker that tries to reach a collector nobody deployed
+    # spends its life failing at something it was never asked to do.
+    otel_endpoint: str = ""
+    otel_interval: float = 15.0
+    otel_timeout: float = 5.0
+    otel_max_queue: int = 1000
+    otel_logs: bool = True
 
     # behaviour
     log_level: str = "INFO"
@@ -160,6 +177,11 @@ _ALIASES = {
     "loglevel": "log_level",
     "service_name": "service",
     "instance_id": "instance",
+    "env": "environment",
+    "deployment_environment": "environment",
+    "otel": "otel_endpoint",
+    "otlp_endpoint": "otel_endpoint",
+    "otel_exporter_otlp_endpoint": "otel_endpoint",
 }
 
 

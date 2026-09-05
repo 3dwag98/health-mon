@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from ..core.model import CheckResult, ErrorCategory, Evidence, Status
@@ -103,6 +103,17 @@ class BaseCheck:
     name: str = "unnamed"
     dependency: str = ""
 
+    # Latency policy, set from the ProbeSpec by the factory.  Applied to
+    # every rung of the ladder that produced an OK, so a dependency judged
+    # healthy from real traffic is held to the same bar as one judged from
+    # a probe -- the two must not disagree about what "fast enough" means.
+    #
+    # None disables the judgement entirely, which is the default: a latency
+    # bar the library picked for you is a pager that goes off at 3am about
+    # a threshold nobody chose.
+    latency_warn_ms: float | None = None
+    latency_critical_ms: float | None = None
+
     # -- to be provided by adapters ------------------------------------- #
 
     def introspect(self, ctx: CheckContext) -> CheckResult | None:
@@ -127,7 +138,7 @@ class BaseCheck:
         # 2. Real traffic.  The strongest evidence there is, and free.
         observed = self.from_traffic(ctx)
         if observed is not None:
-            return observed
+            return self.apply_latency_policy(observed)
 
         # 3. Nothing recent to go on.  Probe, and say so.
         #
@@ -146,7 +157,37 @@ class BaseCheck:
             merged = dict(introspected.observed)
             merged.update(result.observed)
             result = _replace_observed(result, merged)
-        return result
+        return self.apply_latency_policy(result)
+
+    def apply_latency_policy(self, result: CheckResult) -> CheckResult:
+        """Downgrade an otherwise-OK verdict that took too long.
+
+        Only OK results are touched.  A check that already failed has a
+        cause worth more than its latency, and overwriting `pool_exhausted`
+        with `slow` would send on-call to the wrong team.
+        """
+        if result.status is not Status.OK or result.latency_ms is None:
+            return result
+        if self.latency_critical_ms is None and self.latency_warn_ms is None:
+            return result
+
+        latency = result.latency_ms
+        if self.latency_critical_ms is not None and latency >= self.latency_critical_ms:
+            status, threshold = Status.FAILING, self.latency_critical_ms
+        elif self.latency_warn_ms is not None and latency >= self.latency_warn_ms:
+            status, threshold = Status.DEGRADED, self.latency_warn_ms
+        else:
+            return result
+
+        observed = dict(result.observed)
+        observed["latency_threshold_ms"] = threshold
+        return replace(
+            result,
+            status=status,
+            category=ErrorCategory.SLOW,
+            detail=f"{round(latency, 1)}ms exceeds the {round(threshold, 1)}ms threshold",
+            observed=observed,
+        )
 
     def from_traffic(self, ctx: CheckContext) -> CheckResult | None:
         """Verdict from the worker's own recent traffic, or None if stale."""

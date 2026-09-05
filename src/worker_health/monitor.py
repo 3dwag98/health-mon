@@ -15,6 +15,7 @@ from .core.machine import CheckSpec, StateMachine
 from .core.model import (
     LIVENESS_CODE,
     READINESS_CODE,
+    WEDGED_CATEGORIES,
     WIRE,
     CheckResult,
     Evidence,
@@ -75,17 +76,20 @@ class HealthMonitor:
         service: str,
         *,
         version: str = "0.0.0",
+        environment: str = "",
         instance: str | None = None,
         clock: Clock | None = None,
         runner: str = "thread",
         tick: float = 0.1,
         max_workers: int = 8,
         loop_lag_threshold_ms: float = 2000.0,
+        live_on_self_fault: bool = True,
         seed: int | None = None,
         logger=None,
     ) -> None:
         self.service = service
         self.version = version
+        self.environment = environment
         self.instance = instance or os.getenv("HEALTH_INSTANCE") or _default_instance(service)
         self.clock = clock or MonotonicClock()
         self.timings = Timings()
@@ -107,6 +111,12 @@ class HealthMonitor:
         self._instrumented: dict[str, str] = {}
         self._loop_beat = self.clock.monotonic()
         self._loop_lag_threshold_ms = loop_lag_threshold_ms
+        self._live_on_self_fault = live_on_self_fault
+        # Names of checks currently reporting a fault a restart can repair.
+        # Maintained on the WRITE path so live_status() stays a couple of
+        # attribute reads -- a liveness probe that takes the same lock as
+        # everything else is one that fails when the process is merely busy.
+        self._self_faults: frozenset[str] = frozenset()
         self._last_activity: float | None = None
         self._lock = threading.Lock()
         self._results: dict[str, CheckResult] = {}
@@ -123,6 +133,12 @@ class HealthMonitor:
         # Set by setup_worker_health when this process is published to the
         # host's run registry; removed again on stop().
         self.run_record = None
+        # Set by setup_worker_health when OTLP export is configured.  Its
+        # counters ride along on /health because the exporter is silent by
+        # design -- a collector nobody can reach has to be visible SOMEWHERE,
+        # and a log line per failed export during an outage is its own
+        # incident.
+        self.exporter = None
 
         if runner == "asyncio":
             from .runners.asyncio_ import AsyncioRunner
@@ -258,6 +274,7 @@ class HealthMonitor:
             self.machine.apply(result.name, result)
             self._results[result.name] = result
             current = self.machine.state(result.name).effective
+            self._self_faults = self._recompute_self_faults()
 
         if current is not previous:
             critical = self.machine.spec(result.name).critical
@@ -308,17 +325,74 @@ class HealthMonitor:
 
     # -- reads ------------------------------------------------------------ #
 
-    def live_status(self) -> Status:
-        """Liveness answers exactly one question: is our loop responsive.
+    def _recompute_self_faults(self) -> frozenset[str]:
+        """Checks reporting a fault this process did to itself.
 
-        Dependencies are deliberately not consulted.  A failed dependency
+        Called under the lock, from the write path only.
+
+        The second half is load-bearing.  A handler that fails on every
+        message because the database is refusing connections trips the
+        poison-loop threshold within seconds -- and that is NOT a wedged
+        process, it is a correct process in front of a broken dependency.
+        Letting it reach /live would restart the worker, which does not fix
+        the database, which fails the next ten messages, which restarts the
+        worker: the retry storm this whole package exists to prevent, wired
+        the long way round.
+
+        So while any dependency is failing, its explanation outranks every
+        self-fault.  The worker still reports the wedge on /health and
+        /ready; it just refuses to ask a supervisor to act on it while
+        there is a better explanation on the board.
+        """
+        if not self._live_on_self_fault:
+            return frozenset()
+
+        wedged: set[str] = set()
+        dependency_failing = False
+        for name, r in self._results.items():
+            if self.machine.state(name).effective is not Status.FAILING:
+                continue
+            if r.category in WEDGED_CATEGORIES:
+                wedged.add(name)
+            elif r.category is not None:
+                dependency_failing = True
+
+        return frozenset() if dependency_failing else frozenset(wedged)
+
+    def live_status(self) -> Status:
+        """Liveness answers one question: can a restart fix this process.
+
+        DEPENDENCIES are deliberately not consulted.  A failed dependency
         does not mean a dead process, and returning 503 here would restart
-        the entire fleet against a database that is already struggling.
+        the entire fleet against a database that is already struggling --
+        that distinction is the whole reason /live and /ready are separate.
+
+        SELF-INFLICTED faults are a different matter.  A consumer holding a
+        backlog it has stopped taking from, a handler looping on the same
+        poison message, a subscription that silently went away: the process
+        is running, its loop may even be turning, and it will sit there
+        forever.  A restart is exactly the remedy, and /live is the only
+        signal a supervisor watches.  Set ``live_on_self_fault: false`` to
+        keep liveness purely about loop lag.
         """
         lag_ms = (self.clock.monotonic() - self._loop_beat) * 1000.0
         if lag_ms > self._loop_lag_threshold_ms:
             return Status.FAILING
+        if self._self_faults:
+            return Status.FAILING
         return Status.OK
+
+    def live_reasons(self) -> tuple[str, ...]:
+        """Why /live is failing, in the operator's words."""
+        out: list[str] = []
+        lag_ms = self.loop_lag_ms()
+        if lag_ms > self._loop_lag_threshold_ms:
+            out.append(f"health loop is {round(lag_ms)}ms behind its cadence")
+        for name in sorted(self._self_faults):
+            result = self._results.get(name)
+            category = result.category.value if result and result.category else "self_fault"
+            out.append(f"check {name} reports {category}, which a restart can clear")
+        return tuple(out)
 
     def liveness(self) -> Liveness:
         return Liveness.ALIVE if self.live_status() is Status.OK else Liveness.UNALIVE
@@ -589,6 +663,7 @@ class HealthMonitor:
             "service": s.service,
             "instance": s.instance,
             "version": s.version,
+            **({"environment": self.environment} if self.environment else {}),
             "uptime_s": s.uptime_s,
             "time": s.wall_clock,
             "checks": checks,
@@ -603,6 +678,8 @@ class HealthMonitor:
             body["metrics"] = self.timings.export()
         if include_events:
             body["events"] = self.events.recent(20)
+        if self.exporter is not None:
+            body["export"] = self.exporter.status()
         return body
 
     def ready_code(self) -> int:

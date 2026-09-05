@@ -181,9 +181,10 @@ switch ($Command.ToLower()) {
         Write-Host ""
     }
 
-    "metrics" {
-        $m = Invoke-WebRequest @script:HttpExtra -Uri "http://localhost:$($Ports.BILLING)/metrics" -TimeoutSec 8
-        $m.Content -split "`n" | Select-Object -First 40
+    "export" {
+        $m = Invoke-RestMethod @script:HttpExtra -Uri "http://localhost:$($Ports.BILLING)/health" -TimeoutSec 8
+        if ($m.export) { $m.export | ConvertTo-Json }
+        else { Write-Host "OTLP export is not configured (set HEALTH_OTEL_ENDPOINT)" }
     }
 
     # ---- fault injection -------------------------------------------------- #
@@ -219,7 +220,7 @@ worker-health - Windows task runner
   .\run.ps1 logs                 tail the three workers
 
   .\run.ps1 health               aggregate status of every worker
-  .\run.ps1 metrics              prometheus exposition from billing
+  .un.ps1 export               OTLP exporter counters from billing
 
   .\run.ps1 test                 full suite, in a container on the compose network
   .\run.ps1 unit                 unit tier only, native Python, no Docker

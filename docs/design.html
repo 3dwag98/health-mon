@@ -259,7 +259,7 @@ edits &mdash; and, deliberately, no edits at all to the code that does the work.
 
   <rect class="box" x="600" y="236" width="344" height="104" rx="8"/>
   <text x="620" y="266">Health server + scheduler</text>
-  <text class="mono sm" x="620" y="291">/live /ready /health /metrics /events</text>
+  <text class="mono sm" x="620" y="291">/live /ready /health /config /events</text>
   <text class="sm" x="620" y="313">answers from a cached snapshot</text>
 
   <rect class="box" x="600" y="396" width="344" height="84" rx="8"/>
@@ -585,7 +585,7 @@ seconds from becoming a load source on a database that is already struggling.</p
   <rect class="box" x="280" y="566" width="240" height="44" rx="7"/>
   <text class="mono" x="300" y="594">/ready</text>
   <rect class="box" x="550" y="566" width="310" height="44" rx="7"/>
-  <text class="mono" x="570" y="594">/health /metrics /events</text>
+  <text class="mono" x="570" y="594">/health /config /events</text>
 </svg>
 </div>
 <figcaption><b>Figure 3 — the read path never touches a dependency.</b> Evidence is
@@ -833,7 +833,7 @@ them causes any I/O to a dependency.</p>
 
 <figure class="wide">
 <div class="scroll">
-<svg class="dg" viewBox="0 0 960 380" role="img" aria-label="The cached snapshot feeds four transports: live and ready endpoints for the supervisor, a metrics endpoint for Prometheus, an event stream for the dashboard, and structured logs on stdout.">
+<svg class="dg" viewBox="0 0 960 380" role="img" aria-label="The cached snapshot feeds four transports: live and ready endpoints for the supervisor, an OTLP push to a collector, an event stream for the dashboard, and structured logs on stdout.">
   <defs>
     <marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mk"/></marker>
   </defs>
@@ -856,11 +856,11 @@ them causes any I/O to a dependency.</p>
   <text class="xs" x="620" y="78">restart on /live · rotate on /ready</text>
 
   <rect class="box" x="300" y="118" width="240" height="48" rx="7"/>
-  <text class="mono" x="320" y="148">/metrics</text>
+  <text class="mono" x="320" y="148">OTLP push</text>
   <path class="edge" d="M540 142 L596 142" marker-end="url(#a7)"/>
   <text class="xs" x="568" y="134" text-anchor="middle">scraped</text>
   <rect class="box2" x="600" y="118" width="330" height="48" rx="7"/>
-  <text class="sm" x="620" y="140">Prometheus → Grafana, alert rules</text>
+  <text class="sm" x="620" y="140">collector → backend, alert rules</text>
   <text class="xs" x="620" y="158">bounded labels; a binary series and a severity series</text>
 
   <rect class="box" x="300" y="198" width="240" height="48" rx="7"/>
@@ -908,7 +908,7 @@ property of the type rather than of a redaction regex that has to keep up.</figc
 <tr><td><code>probes/</code></td><td><code>ProbeSpec</code>, <code>ProbeFactory</code>, the built-in builders, <code>"@name"</code> context references, entry-point plugin discovery.</td></tr>
 <tr><td><code>checks/</code></td><td>One module per dependency kind, each implementing the ladder in Figure 4.</td></tr>
 <tr><td><code>transports/</code></td><td>The HTTP server, the CLI, and the host run registry.</td></tr>
-<tr><td><code>telemetry/</code></td><td>Structured events, the Prometheus metric set, redaction.</td></tr>
+<tr><td><code>telemetry/</code></td><td>Structured events, the OTLP exporter and its metric set, redaction.</td></tr>
 <tr><td><code>worker_health_django/</code></td><td><code>WorkerHealthCommand</code>, <code>AppConfig.ready()</code> autowiring, in-app views, and the django-health-check adapter.</td></tr>
 <tr><td><code>worker_health_fastapi/</code></td><td>The lifespan wiring, settings, and optional in-app routes.</td></tr>
 </tbody>

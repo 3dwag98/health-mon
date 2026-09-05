@@ -1,6 +1,6 @@
 """Optional in-app health routes.
 
-The SDK already serves /live, /ready, /health and /metrics on its OWN
+The SDK already serves /live, /ready, /health and /config on its OWN
 thread and its own port, and that remains the authoritative surface: it
 keeps answering when the event loop is wedged, which is precisely when a
 route defined here would stop responding.
@@ -13,7 +13,7 @@ them as the only liveness signal.
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 
 router = APIRouter(prefix="/internal", tags=["health"])
 
@@ -55,11 +55,3 @@ async def ready(request: Request):
 async def health(request: Request):
     return JSONResponse(content=_monitor(request).snapshot_dict(include_events=True))
 
-
-@router.get("/metrics")
-async def metrics(request: Request):
-    from worker_health.telemetry.prometheus import render
-
-    return PlainTextResponse(
-        render(_monitor(request)), media_type="text/plain; version=0.0.4"
-    )

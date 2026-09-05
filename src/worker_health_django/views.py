@@ -18,9 +18,7 @@ publicly.
 """
 from __future__ import annotations
 
-import json
-
-from django.http import HttpResponse, JsonResponse
+from django.http import JsonResponse
 
 from .state import get_monitor
 
@@ -89,14 +87,3 @@ def events(request):
         return error
     return JsonResponse({"events": monitor.events.recent(50)})
 
-
-def metrics(request):
-    monitor, error = _monitor_or_503()
-    if error:
-        return HttpResponse(
-            json.dumps(_NOT_WIRED), status=503, content_type="application/json")
-
-    from worker_health.telemetry.prometheus import render
-
-    return HttpResponse(render(monitor),
-                        content_type="text/plain; version=0.0.4")

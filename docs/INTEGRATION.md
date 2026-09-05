@@ -24,7 +24,7 @@ def handle(message: dict):
     process_payment(message)      # unchanged
 ```
 
-That gets you `/live`, `/ready`, `/health`, `/metrics`, `/events`,
+That gets you `/live`, `/ready`, `/health`, `/config`, `/events`,
 structured logs, dependency checks, processing health and dashboard
 metrics.
 
@@ -123,11 +123,11 @@ callback.
 
 | Path | Purpose |
 |---|---|
-| `/live` | Loop responsiveness only. Never 503s on a dependency failure. |
+| `/live` | Is this process wedged? Loop lag, or a fault it did to itself. Never 503s on a dependency failure. |
 | `/ready` | Full readiness. 503 on `starting` or `unready`; `degraded` stays 200. |
 | `/health` | Full snapshot: checks, processing, timing windows, per-check settings, recent events. |
 | `/config` | The settings behind the verdicts: intervals, timeouts, thresholds, criticality, and which clients are instrumented. Redacted. |
-| `/metrics` | Prometheus exposition, bounded labels. |
+| `/config` | The settings the verdicts are made with, credentials redacted. |
 | `/events` | The last 50 structured events. |
 
 `worker-health --url http://127.0.0.1:8080` is the CLI equivalent of

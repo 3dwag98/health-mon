@@ -36,6 +36,7 @@ SELF_FAULTS = frozenset({
 DEPENDENCY_FAULTS = frozenset({
     ErrorCategory.CONNECTION_REFUSED,
     ErrorCategory.TIMEOUT,
+    ErrorCategory.SLOW,
     ErrorCategory.AUTH_FAILED,
     ErrorCategory.BROKER_ALARM,
     ErrorCategory.BROKER_SHUTDOWN,

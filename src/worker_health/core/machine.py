@@ -210,9 +210,27 @@ class StateMachine:
             return Status.DISABLED
         if st.last_result is None:
             return Status.UNKNOWN
-        if self._clock.monotonic() - st.last_result.checked_at > spec.ttl:
+        if self._clock.monotonic() - st.last_result.checked_at > self._ttl(name):
             return Status.UNKNOWN
         return st.effective
+
+    def _ttl(self, name: str) -> float:
+        """The TTL in force right now, widened to fit any active backoff.
+
+        Backoff is meant to change probe FREQUENCY and never reported
+        status.  A fixed TTL breaks that promise the moment the backed-off
+        interval outgrows it: the check is asked every 60s, its result ages
+        past a 5s TTL in between, and a dependency that is definitively
+        FAILING reads as UNKNOWN -- losing the category, the detail, and the
+        alert written against it, precisely during the outage.
+
+        Only widened while backing off, so a healthy check keeps the tight
+        TTL that makes a wedged scheduler visible.
+        """
+        spec, st = self._specs[name], self._states[name]
+        if not st.backoff_step:
+            return spec.ttl
+        return max(spec.ttl, self.next_interval(name) * 2 + spec.timeout)
 
     def due(self, name: str) -> bool:
         if not self._specs[name].enabled:

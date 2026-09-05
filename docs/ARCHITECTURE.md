@@ -94,8 +94,9 @@ flowchart TB
             end
 
             SNAP["Snapshot<br/>cached, no I/O on read"]
-            HTTP["HealthServer thread<br/>/live /ready /health<br/>/config /metrics /events"]
+            HTTP["HealthServer thread<br/>/live /ready /health<br/>/config /events"]
             EV["EventEmitter<br/>structured JSON events"]
+            OTLP["OTLPExporter thread<br/>bounded queue · push"]
         end
     end
 
@@ -108,8 +109,8 @@ flowchart TB
 
     subgraph Ops["Operations"]
         PM2["PM2 / supervisor"]
-        PROM["Prometheus"]
-        GRAF["Grafana"]
+        COLL["OTel collector"]
+        BACKEND["Metrics backend"]
         LOGS["Log pipeline"]
     end
 
@@ -136,7 +137,9 @@ flowchart TB
     SM --> EV
 
     HTTP -->|"200/503"| PM2
-    HTTP -->|"/metrics"| PROM --> GRAF
+    SNAP --> OTLP
+    EV --> OTLP
+    OTLP -->|"OTLP/HTTP push"| COLL --> BACKEND
     EV --> LOGS
 ```
 
@@ -183,7 +186,7 @@ flowchart LR
     end
 
     subgraph telemetry["worker_health.telemetry"]
-        prom["prometheus.py"] ; events["events.py"] ; logs["logs.py"]
+        otel["otel.py"] ; events["events.py"] ; logs["logs.py"]
     end
 
     monitor["monitor.py — HealthMonitor"]
@@ -289,7 +292,7 @@ flowchart TB
 
     subgraph T4["Thread: wh-http"]
         H1["/live — one clock read"]
-        H2["/ready /health /metrics —<br/>cached snapshot, no I/O"]
+        H2["/ready /health /config —<br/>cached snapshot, no I/O"]
     end
 
     T2 -->|submit| T3
@@ -731,16 +734,17 @@ flowchart LR
     RED --> RING["ring buffer (100)<br/>served at /events"]
     RED --> SUB["monitor.on_event(fn)<br/>your own sink"]
 
-    SNAP["Snapshot"] --> PROM["prometheus.render()"]
-    PROM --> BIN["binary series<br/>worker_health_ready<br/>worker_health_check_status"]
-    PROM --> SEV["severity series<br/>worker_health_status<br/>worker_health_check_severity"]
-    PROM --> MSG["processing series<br/>message_*_total · queue_lag<br/>last_message_age_seconds"]
-    PROM --> FRESH["freshness series<br/>worker_to_health_delta_ms<br/>evidence_age_ms · loop_lag_ms"]
+    SNAP["Snapshot"] --> OTLP["otel.build_metrics()"]
+    OTLP --> BIN["binary series<br/>worker_health_ready<br/>worker_health_check_status"]
+    OTLP --> SEV["severity series<br/>worker_health_status<br/>worker_health_check_severity"]
+    OTLP --> MSG["processing series<br/>message_*_total · queue_lag<br/>last_message_age_seconds"]
+    OTLP --> FRESH["freshness series<br/>worker_to_health_delta_ms<br/>evidence_age_ms · loop_lag_ms"]
 
-    BIN --> ALERTS["alerts.yml — every rule uses == 0"]
-    SEV --> DASH["Grafana"]
+    BIN --> ALERTS["alert rules — every one uses == 0"]
+    SEV --> DASH["Metrics backend"]
     MSG --> DASH
     FRESH --> DASH
+    RING --> OTLPL["otel.build_logs()<br/>transitions as OTLP logs"] --> DASH
     J --> LOKI["log pipeline → transition log panel"]
 ```
 
@@ -781,9 +785,9 @@ flowchart TB
     end
 
     subgraph obs["Observability"]
-        PROM["Prometheus<br/>scrapes /metrics"]
-        GRAF["Grafana<br/>Worker Health Overview"]
-        ALERT["Alertmanager"]
+        COLL["OTel collector<br/>receives OTLP push"]
+        GRAF["Metrics backend"]
+        ALERT["Alerting"]
         DASH["Fleet dashboard<br/>polls /health, SSE to browsers"]
         LOG["Log pipeline<br/>structured events"]
     end
@@ -793,10 +797,10 @@ flowchart TB
     PM22 -.-> W2
     PM23 -.-> W3
 
-    PROM -->|":8080/metrics"| W1 & W2 & W3
+    W1 & W2 & W3 -->|"OTLP push :4318"| COLL
     DASH -->|":8080/health"| W1 & W2 & W3
-    PROM --> GRAF
-    PROM --> ALERT
+    COLL --> GRAF
+    COLL --> ALERT
     W1 & W2 & W3 -->|stdout JSON| LOG --> GRAF
 
     style deps fill:#f4f6f7,stroke:#888

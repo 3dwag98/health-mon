@@ -1,4 +1,4 @@
-.PHONY: up down build logs ps test unit chaos health metrics restore burst idle demo clean
+.PHONY: up down build logs ps test unit chaos health export restore burst idle demo clean
 
 TOXI ?= http://localhost:8474
 
@@ -38,8 +38,8 @@ health:           ## print every worker's aggregate status
 	    2>/dev/null || echo "unreachable"; \
 	done
 
-metrics:          ## prometheus exposition from the billing worker
-	@curl -s --noproxy '*' http://localhost:8081/metrics | head -40
+export:           ## OTLP exporter counters from the billing worker
+	@curl -s --noproxy '*' http://localhost:8081/health 	  | python -c "import json,sys; print(json.dumps(json.load(sys.stdin).get('export', {'export': 'not configured'}), indent=2))"
 
 # ---- fault injection ------------------------------------------------------ #
 # Each target injects one fault against the running fleet. Watch the dashboard.

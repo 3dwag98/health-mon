@@ -20,7 +20,7 @@ import sys
 
 from sqlalchemy import text
 
-from runtime import build, consume_channel
+from runtime import build, stop_consuming, supervise_consume
 
 SERVICE = os.getenv("SERVICE", "reconcile")
 QUEUE = os.getenv("IN_QUEUE", "billing.audit")
@@ -30,8 +30,6 @@ def main() -> int:
     ctx = build(SERVICE, runner="asyncio", queue=QUEUE, pool_size=3)
     log, monitor, conn = ctx["logger"], ctx["monitor"], ctx["connection"]
     tracker, engine, redis = ctx["tracker"], ctx["engine"], ctx["redis"]
-
-    channel = consume_channel(ctx, QUEUE)
 
     drift = {"count": 0, "checked": 0}
 
@@ -80,23 +78,18 @@ def main() -> int:
         else:
             ch.basic_ack(method.delivery_tag)
 
-    channel.basic_consume(queue=QUEUE, on_message_callback=on_message)
-
     def shutdown(signum, frame):
-        try:
-            channel.stop_consuming()
-        except Exception:
-            pass
+        stop_consuming(ctx)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
     try:
-        channel.start_consuming()
+        supervise_consume(ctx, QUEUE, on_message)
     finally:
         ctx["health"].stop(timeout=3)
         try:
-            conn.close()
+            ctx["connection"].close()
         except Exception:
             pass
     return 0

@@ -28,6 +28,11 @@ x-worker-env: &worker-env
   # Controlled restart is OFF by default. Set to true to arm it; the policy
   # only ever exits the process and lets the supervisor restart it.
   RESTART_ENABLED: "false"
+  # Telemetry is pushed, not scraped: a PM2 fleet has no stable scrape
+  # targets. Unset this and export simply does not run.
+  HEALTH_OTEL_ENDPOINT: http://otel-collector:4318
+  HEALTH_OTEL_INTERVAL: "5"
+  HEALTH_ENVIRONMENT: demo
   PYTHONPATH: /app/workers
 
 services:
@@ -102,9 +107,23 @@ services:
       timeout: 3s
       retries: 15
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./docker/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "${OTEL_METRICS_PORT:-8888}:8888"
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--help"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   billing:
     build: {context: ., dockerfile: docker/Dockerfile.worker}
-    command: ["python", "worker_billing.py"]
+    command: ["python", "/app/workers/worker_billing.py"]
     environment:
       <<: *worker-env
       SERVICE: billing
@@ -113,6 +132,7 @@ services:
       OUT_QUEUE: billing.out
       AUDIT_QUEUE: billing.audit
     depends_on:
+      otel-collector: {condition: service_started}
       toxiproxy: {condition: service_started}
       postgres:  {condition: service_healthy}
       rabbitmq:  {condition: service_healthy}
@@ -122,7 +142,7 @@ services:
 
   notify:
     build: {context: ., dockerfile: docker/Dockerfile.worker}
-    command: ["python", "worker_notify.py"]
+    command: ["python", "/app/workers/worker_notify.py"]
     environment:
       <<: *worker-env
       SERVICE: notify
@@ -135,7 +155,7 @@ services:
 
   reconcile:
     build: {context: ., dockerfile: docker/Dockerfile.worker}
-    command: ["python", "worker_reconcile.py"]
+    command: ["python", "/app/workers/worker_reconcile.py"]
     environment:
       <<: *worker-env
       SERVICE: reconcile
@@ -148,7 +168,7 @@ services:
 
   loadgen:
     build: {context: ., dockerfile: docker/Dockerfile.worker}
-    command: ["python", "loadgen.py"]
+    command: ["python", "/app/workers/loadgen.py"]
     environment:
       <<: *worker-env
       SERVICE: loadgen
@@ -190,11 +210,14 @@ services:
     environment:
       <<: *worker-env
       TOXIPROXY_URL: http://toxiproxy:8474
+      OTEL_COLLECTOR_URL: http://otel-collector:8888
+      DASHBOARD_URL: http://dashboard:9000
       BILLING_URL: http://billing:8080
       NOTIFY_URL: http://notify:8080
       RECONCILE_URL: http://reconcile:8080
       PYTHONPATH: /app/src:/app/workers:/app
     depends_on:
+      otel-collector: {condition: service_started}
       toxiproxy: {condition: service_started}
       postgres:  {condition: service_healthy}
       rabbitmq:  {condition: service_healthy}

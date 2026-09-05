@@ -53,6 +53,7 @@ testpaths = ["tests"]
 timeout = 180
 markers = [
   "unit: no containers, must run with the docker daemon stopped",
+  "system: the supervisor contract, over real HTTP, no containers",
   "integration: needs the compose dependency stack",
   "faults: fault injection via toxiproxy",
   "slow: over ten seconds",

@@ -2,6 +2,7 @@
 
 Metrics, structured events, dashboards and alerts.
 
+- [How telemetry leaves the worker](#how-telemetry-leaves-the-worker)
 - [Metric reference](#metric-reference)
 - [Why two families per verdict](#why-two-families-per-verdict)
 - [Label cardinality](#label-cardinality)
@@ -12,10 +13,67 @@ Metrics, structured events, dashboards and alerts.
 
 ---
 
+## How telemetry leaves the worker
+
+Telemetry is **pushed** over OTLP/HTTP. There is no `/metrics` endpoint and
+nothing scrapes the worker.
+
+A worker fleet under a process supervisor has no stable scrape targets:
+processes come and go on ports the supervisor chose, and plenty of them sit
+behind a NAT a collector cannot reach. Pushing inverts that — the worker
+needs one outbound URL, and nothing has to discover it.
+
+```yaml
+worker_health:
+  otel_endpoint: http://otel-collector:4318   # empty disables export entirely
+  otel_interval: 15.0                         # seconds between pushes
+  otel_timeout: 5.0
+  otel_max_queue: 1000
+  otel_logs: true                             # also push transition events
+```
+
+Any of these can be set from the environment (`HEALTH_OTEL_ENDPOINT`,
+`HEALTH_OTEL_INTERVAL`, ...), which is what an operator can change without a
+rebuild.
+
+Three properties make this safe to leave on:
+
+- **The queue is bounded.** When the collector is slow or gone the queue
+  fills and the *oldest* payload is dropped, so the newest state still gets
+  through when the link returns. An unbounded queue is how a health library
+  becomes the reason a worker runs out of memory.
+- **It runs on its own thread.** A handler never waits on a socket to a
+  collector.
+- **It fails silently.** A collector that is down is not a worker problem, so
+  nothing is raised and nothing is logged per occurrence — a log line per
+  failed export during a collector outage is its own incident.
+
+Because it is silent, its counters ride along on `/health` instead:
+
+```json
+"export": {
+  "endpoint": "http://otel-collector:4318",
+  "interval": 15.0,
+  "exported": 412, "failed": 0, "dropped": 0, "queued": 0,
+  "last_error": null
+}
+```
+
+`failed` climbing means the collector is unreachable. `dropped` climbing
+means it is reachable but cannot keep up.
+
+Resource attributes on every payload: `service.name`, `service.instance.id`,
+`service.version`, `worker_health.runner`.
+
+---
+
 ## Metric reference
 
-All at `GET /metrics`, Prometheus text format. Every series carries
-`service` and `instance`.
+Pushed as OTLP metrics. The names and severity ordinals below are unchanged
+from the exposition format this replaced, so queries written against them
+port over as-is. `service` and `instance` are resource attributes rather than
+per-series labels; everything else listed as a label is a data-point
+attribute.
 
 ### Worker verdicts
 
@@ -178,13 +236,89 @@ A sink that raises is swallowed — a broken exporter must never break health.
 
 ## Dashboard
 
-Import [`deploy/grafana/worker-health-overview.json`](../deploy/grafana/worker-health-overview.json).
-Variables: `datasource`, `logs`, `service`, `instance`, `queue`, `check`.
+The repo ships a zero-dependency fleet dashboard (`docker compose up -d`,
+then <http://localhost:9000>). It leads with one plain sentence — *"All 3
+workers are processing normally"*, or *"reconcile cannot process work:
+postgres is failing — it accepted the connection but never answered"* — and
+carries a built-in "How to read this page" guide covering the four states,
+the three evidence levels and what each graph shows.
 
-**One question per row**, and only the three you need during an incident are
-open by default. Every panel carries a `description`, which Grafana shows as
-an ⓘ in its header — so the explanation travels with the panel instead of
-living in a document nobody opens at 3am.
+It gets its data two ways, because they answer different questions.
+
+**OTLP push** (`POST /v1/metrics`) is how a worker nothing can reach gets
+onto the board. Workers push to the collector they already know about; the
+collector fans out here:
+
+```yaml
+exporters:
+  otlphttp/dashboard:
+    endpoint: http://dashboard:9000
+    encoding: json
+service:
+  pipelines:
+    metrics:
+      exporters: [debug, otlphttp/dashboard]
+```
+
+Nothing in a worker knows the dashboard exists. Workers are **discovered** by
+pushing rather than enumerated in a config file, which is what lets the board
+scale past the ones somebody remembered to list. A pushed worker that goes
+quiet is forgotten after `OTLP_TTL` (90s).
+
+**Polling `/health`** is kept for workers whose address is known, because
+that body carries what a metric stream cannot: readiness `reasons` in the
+operator's own words, per-check `detail`, and the probe settings behind each
+verdict. Where both exist the polled body wins and the push keeps the entry
+warm — a pushed `billing-1` and a polled `billing` are matched by instance id
+and shown as one worker, not two.
+
+### The rollup: one row per broken thing
+
+Fifty workers reporting `postgres failing (connection_refused)` is **one**
+database outage. Rendering it as fifty sick workers buries the only fact
+anyone can act on, so the board groups broken checks by `(check, category)`
+and leads with the group:
+
+```
+  3   postgres is failing for 3 workers · critical      [do not restart]
+workers   nothing is listening on that port — One shared dependency, not 3
+          sick workers. Fix postgres and they all recover; restarting them
+          would not help.
+          billing, notify, reconcile
+```
+
+A group seen by fewer than `SHARED_OUTAGE_MIN` (2) workers is shown as a
+single sick worker instead — *"only this worker sees it, so look at the
+worker before the dependency"*. Shared and critical groups sort first, which
+is the order someone reads under pressure and is not alphabetical.
+
+### Staleness: alive but not working
+
+The failure with no process-level symptom gets its own row. Two ways in, and
+both need the backlog half — an idle worker on an empty queue is healthy
+forever, and saying otherwise is the false positive that teaches a team to
+ignore the board:
+
+- a **wedged category** (`not_consuming`, `stalled`, `not_subscribed`,
+  `credit_exhausted`, `poison_loop`), which is the one case a restart
+  repairs and which `/live` is already returning 503 for; or
+- **backlog with silence** — `queue_lag > 0` and nothing received for
+  `STALE_AFTER` (60s).
+
+A wedge that a **failing dependency explains** is marked *do not restart*,
+matching what the worker's own `/live` does: a handler failing on every
+message because the database is down trips the poison-loop threshold within
+seconds, and restarting it is how a dependency outage becomes a crash loop.
+The board and `/live` apply the same precedence, or one of the two is lying.
+
+For a longer-lived fleet view, point the OTLP endpoint at whatever backend
+you already run. The sections below describe what to build there; the layout
+is what worked in practice rather than a file you can import.
+
+**One question per row**, and only the three you need during an incident
+open by default. Give every panel a description where the tool supports one,
+so the explanation travels with the panel instead of living in a document
+nobody opens at 3am.
 
 | Row | The question it answers | Open by default |
 |---|---|---|
@@ -209,31 +343,18 @@ Two panels are worth knowing by name:
   the dashboard itself. If it climbs, every other panel is describing a worker
   nobody has heard from recently.
 
-The state-change log needs a Loki (or equivalent) datasource selected in the
-`logs` variable. Without a log pipeline, the same events are available at each
-worker's `/events`.
-
-The repo also ships a zero-dependency live dashboard (`docker compose up -d`,
-then <http://localhost:9000>) that polls `/health` and streams to browsers
-over SSE. It leads with one plain sentence — *"All 3 workers are processing
-normally"*, or *"reconcile cannot process work: postgres is failing — it
-accepted the connection but never answered"* — and carries a built-in "How to
-read this page" guide covering the four states, the three evidence levels and
-what each graph shows.
+The state-change row is fed by the transition events, which are pushed as
+OTLP logs when `otel_logs` is on. Without a log pipeline, the same events are
+available at each worker's `/events`.
 
 ### Coexisting with an application's own metrics
 
-If the app already exposes `/metrics` through
+Nothing to coexist with any more: worker-health serves no `/metrics`
+endpoint, so an app already exposing one through
 `prometheus-fastapi-instrumentator`, `starlette-exporter` or
-`django-prometheus`, worker-health's `/metrics` is a **second** endpoint on
-a **different** port. That is deliberate, not a conflict:
-
-- theirs measures HTTP traffic, which a worker does not have;
-- worker-health's port is served from its own thread, so it still answers
-  when the event loop is wedged — which is when you most want the numbers.
-
-Scrape both. The metric names do not collide (everything here is prefixed
-`worker_health_`), and the `service` / `instance` labels line the two up.
+`django-prometheus` is unaffected. The two streams meet in the backend, where
+they do not collide — every name here is prefixed `worker_health_`, and
+`service.name` / `service.instance.id` line them up.
 
 ---
 
@@ -297,8 +418,9 @@ port to loopback or a private interface, as
 
 ## Alerts
 
-The full set is in [`deploy/prometheus/alerts.yml`](../deploy/prometheus/alerts.yml).
-The five that matter most:
+Written below in PromQL because it is the most widely readable form; the
+metric names are the same whatever backend receives the OTLP stream. The five
+that matter most:
 
 ```yaml
 # Cannot process work.
@@ -340,6 +462,9 @@ a deep queue with a busy consumer is fine, and a silent consumer on an empty
 queue is fine. The conjunction is the outage — and it is invisible to every
 process-level check.
 
-Note also `WorkerHealthEndpointDown` (`up == 0`): a worker that is
-unreachable is not the same as a worker that is unready, and without its own
+Add one more rule for absence. With scraping, a worker that vanished showed
+up as `up == 0`; with pushing there is no `up` series, so alert on the
+telemetry itself going quiet — `absent_over_time(worker_health_ready[5m])`,
+or the equivalent staleness rule in your backend. A worker that stopped
+reporting is not the same as a worker reporting unready, and without its own
 rule it looks healthy by absence.

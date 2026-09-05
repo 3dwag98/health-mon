@@ -27,7 +27,28 @@ module.exports = {
         RESTART_ENABLED: "false",  // opt in deliberately, per worker
         RESTART_AFTER_CYCLES: "5",
         RESTART_MIN_UPTIME: "120", // never restart a process that just booted
+
+        // Telemetry is pushed, so the supervisor does not have to make this
+        // process discoverable by anything except itself.
+        HEALTH_OTEL_ENDPOINT: "http://otel-collector:4318",
+        HEALTH_ENVIRONMENT: "production",
       },
+
+      // PM2 watches /live and NEVER /ready. This is the load-bearing line
+      // in the file.
+      //
+      //   /live  503 -> this process is wedged: its loop stopped turning, or
+      //                 it is holding a backlog it has stopped consuming.
+      //                 A restart is the actual remedy.
+      //   /ready 503 -> a dependency it needs is down. Restarting does not
+      //                 bring the dependency back; it converts one database
+      //                 outage into forty crash-looping workers hammering a
+      //                 database that is already in trouble, and destroys the
+      //                 in-flight work each was holding.
+      //
+      // Point a load balancer at /ready. Point the supervisor at /live.
+      health_check_url: "http://127.0.0.1:8080/live",
+      health_check_grace_period: 30,
 
       // Back off rather than hammering a dependency that is already down.
       exp_backoff_restart_delay: 500,

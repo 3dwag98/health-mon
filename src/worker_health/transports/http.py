@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Paths served.  Anything else is a 404 with a hint, because the single
 # most common integration mistake is asking for /healthz or /readyz.
-ROUTES = ("/live", "/ready", "/health", "/config", "/metrics", "/events", "/")
+ROUTES = ("/live", "/ready", "/health", "/config", "/events", "/")
 
 
 def make_app(monitor):
@@ -39,15 +39,6 @@ def make_app(monitor):
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_text(self, code: int, text: str, content_type: str) -> None:
-            body = text.encode()
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-
         def do_GET(self):  # noqa: N802
             path = self.path.split("?")[0].rstrip("/") or "/"
             if path == "/live":
@@ -55,12 +46,18 @@ def make_app(monitor):
                 # clock read, no snapshot, no lock.  A liveness probe that
                 # contends on the same lock as everything else is a liveness
                 # probe that fails when the process is merely busy.
-                self._send(monitor.live_code(), {
+                code = monitor.live_code()
+                body = {
                     "status": monitor.liveness().value,
                     "loop_lag_ms": monitor.loop_lag_ms(),
                     "service": monitor.service,
                     "instance": monitor.instance,
-                })
+                }
+                if code != 200:
+                    # A supervisor that just killed a process deserves to
+                    # find out why without a second request.
+                    body["reasons"] = list(monitor.live_reasons())
+                self._send(code, body)
             elif path == "/ready":
                 # Deliberately lean: a readiness probe runs every couple of
                 # seconds from a supervisor, and does not need the settings
@@ -77,10 +74,6 @@ def make_app(monitor):
                 self._send(200, monitor.describe_config())
             elif path == "/events":
                 self._send(200, {"events": monitor.events.recent(50)})
-            elif path == "/metrics":
-                from ..telemetry.prometheus import render
-
-                self._send_text(200, render(monitor), "text/plain; version=0.0.4")
             else:
                 self._send(404, {"error": "not found", "routes": list(ROUTES)})
 

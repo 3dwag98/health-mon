@@ -22,6 +22,5 @@ urlpatterns = [
     path("health", views.health, name="health"),
     path("config", views.config, name="config"),
     path("events", views.events, name="events"),
-    path("metrics", views.metrics, name="metrics"),
     path("", views.health, name="index"),
 ]

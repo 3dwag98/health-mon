@@ -118,11 +118,11 @@ cover request metrics well but are about HTTP traffic — a worker has none.
 
 Two things this reading changed:
 
-1. **Interop note.** If an app already exposes `/metrics` through one of
-   those instrumentators, worker-health's `/metrics` is a *second* endpoint
-   on a *different* port. That is fine and deliberate — the worker's health
-   port answers when the event loop is wedged and an in-app route does not —
-   but it needs saying, and now does, in
+1. **Interop note.** Those instrumentators own `/metrics` in the app, and
+   worker-health no longer competes for it: telemetry is pushed over OTLP,
+   so there is nothing to scrape here and nothing to collide with. The two
+   streams meet in the backend, where the `worker_health_` prefix and the
+   `service.name` / `service.instance.id` attributes line them up. Said in
    [OBSERVABILITY.md](OBSERVABILITY.md).
 2. **Django reached parity with FastAPI.** The FastAPI integration always
    shipped optional in-app routes (`/internal/live` and friends) for
@@ -183,7 +183,7 @@ Concretely, in this repo:
 | `django_health_check` probe type, and `ADOPT_HEALTH_CHECK_PLUGINS` | as above |
 | Optional in-app Django views at `worker_health_django.urls` | parity with the FastAPI `/internal` routes |
 | The `skip=("DatabaseBackend",)` guidance | django-health-check's DB backend writes a row per check |
-| Documented `/metrics` coexistence with FastAPI instrumentators | prometheus-fastapi-instrumentator |
+| OTLP push rather than a competing `/metrics` route | prometheus-fastapi-instrumentator |
 
 And what was *confirmed* rather than changed: the cached-snapshot read path,
 the liveness/readiness split, `degraded` staying in rotation, read-only

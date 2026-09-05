@@ -155,6 +155,11 @@ class ErrorCategory(str, Enum):
 
     # transport
     TIMEOUT = "timeout"
+    # Answered, but too slowly to be useful.  Distinct from TIMEOUT on
+    # purpose: a dependency that replies in 900ms is up, and the operator
+    # response ("why is it slow") is nothing like the response to a
+    # dependency that never replied at all.
+    SLOW = "slow"
     CONNECTION_REFUSED = "connection_refused"
     CONNECTION_LOST = "connection_lost"
     PROTOCOL_ERROR = "protocol_error"
@@ -188,6 +193,25 @@ class ErrorCategory(str, Enum):
     STALE = "stale"
     INTERNAL = "internal"
     UNKNOWN = "unknown"
+
+
+# The categories that mean THIS PROCESS is wedged: it is running, its loop
+# may even be turning, and it will sit here forever without intervention.
+# A restart is the actual remedy, so these -- and only these -- are allowed
+# to make /live fail.
+#
+# Deliberately NARROWER than policy.restart.SELF_FAULTS, which also lists
+# CONNECTION_LOST.  A lost connection is usually the dependency restarting,
+# the worker reconnects on its own, and killing it changes nothing except
+# the amount of in-flight work destroyed.  A supervisor watching /live must
+# never be handed that.
+WEDGED_CATEGORIES = frozenset({
+    ErrorCategory.STALLED,          # receiving work, completing none
+    ErrorCategory.NOT_CONSUMING,    # backlog present, taking nothing from it
+    ErrorCategory.NOT_SUBSCRIBED,   # connection open, subscription gone
+    ErrorCategory.CREDIT_EXHAUSTED, # every prefetch slot held by an unacked message
+    ErrorCategory.POISON_LOOP,      # same message failing over and over
+})
 
 
 @dataclass(frozen=True, slots=True)

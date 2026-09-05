@@ -108,6 +108,7 @@ def build_postgres(spec: ProbeSpec, context: Mapping[str, Any]):
         name=spec.name,
         dependency=_dependency(spec, "postgres"),
         pool_warn_ratio=float(_first(spec, "pool_warn_ratio", default=0.9)),
+        pool_critical_ratio=float(_first(spec, "pool_critical_ratio", default=1.0)),
     )
 
 
@@ -192,7 +193,8 @@ def build_rabbitmq(spec: ProbeSpec, context: Mapping[str, Any]):
         )
     return RabbitMQCheck(
         state,
-        queue=str(_require(spec, "queue")),
+        queue=str(_first(spec, "queue", "queue_name")
+                  or _require(spec, "queue")),
         name=spec.name,
         dependency=_dependency(spec, "rabbitmq"),
         backlog_threshold=int(_first(spec, "backlog_threshold", "max_depth", default=1000)),

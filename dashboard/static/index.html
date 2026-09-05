@@ -142,6 +142,27 @@
   @media (max-width:900px){.grid2{grid-template-columns:1fr}
     .crow,.chead{grid-template-columns:1fr 1fr;row-gap:4px}
     .chead{display:none}}
+  /* Shared-cause rollup. One row per broken THING, not per sick worker. */
+  .rollup{margin:10px 0 2px;display:flex;flex-direction:column;gap:7px}
+  .cause{display:flex;align-items:flex-start;gap:11px;padding:11px 14px;
+    border:1px solid var(--rule);border-left:4px solid var(--serious);
+    border-radius:6px;background:var(--surface)}
+  .cause.failing{border-left-color:var(--critical);background:var(--critical-bg)}
+  .cause.degraded{border-left-color:var(--warning);background:var(--warning-bg)}
+  .cause.wedged{border-left-color:var(--serious);background:var(--serious-bg)}
+  .cause .body{flex:1;min-width:0}
+  .cause .title{font-weight:600;font-size:13.5px;letter-spacing:-.01em}
+  .cause .why{color:var(--ink-2);font-size:12.5px;margin-top:3px}
+  .cause .who{color:var(--ink-2);font-size:11.5px;margin-top:5px;
+    font-family:var(--mono);word-break:break-word}
+  .cause .count{flex:0 0 auto;font-weight:600;font-size:19px;line-height:1.05;
+    text-align:center;min-width:44px}
+  .cause .count small{display:block;font-size:10px;font-weight:500;
+    letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2)}
+  .cause .act{flex:0 0 auto;font-size:11px;padding:3px 8px;border-radius:99px;
+    border:1px solid var(--rule);color:var(--ink-2);white-space:nowrap}
+  .cause .act.restart{color:var(--critical);border-color:var(--critical)}
+
   .panel{background:var(--surface);border:1px solid var(--rule);border-radius:6px;
     padding:14px 16px}
   .panel h2{margin:0 0 3px;font-size:13px;font-weight:650}
@@ -236,6 +257,8 @@
     <div class="headline">Connecting…</div>
     <div class="detail">Waiting for the first report from the fleet.</div>
   </div>
+
+  <div id="rollup"></div>
 
   <div class="fleetbar" id="kpis"></div>
   <div id="workers"></div>
@@ -347,7 +370,7 @@
 
 <script>
 const S = { workers:{}, history:{}, transitions:[], configs:{},
-            connected:false, lastEvent:0 };
+            outages:[], stale:[], connected:false, lastEvent:0 };
 
 /* Categorical hues, assigned in fixed order and pinned to a dependency so a
    colour always means the same thing. Never cycled: an unknown check gets the
@@ -549,6 +572,89 @@ function queueStat(w, key){
 }
 
 /* -- tiles ----------------------------------------------------------------- */
+
+/* The rollup: what is broken, grouped by the thing that is broken.
+   Fifty workers reporting the same database down is ONE database outage,
+   and rendering it as fifty sick workers buries the only actionable fact. */
+function renderRollup(){
+  const box = el("rollup");
+  const outages = S.outages || [], stale = S.stale || [];
+  if (!outages.length && !stale.length){ box.innerHTML = ""; return; }
+
+  const rows = [];
+
+  outages.forEach(o => {
+    const shared = o.shared;
+    const cls = o.status === "failing" ? "failing" : "degraded";
+    const who = o.workers.length > 6
+      ? o.workers.slice(0,6).join(", ") + ` +${o.workers.length-6} more`
+      : o.workers.join(", ");
+    const title = shared
+      ? `${esc(o.check)} is ${o.status} for ${o.count} ${plural(o.count,"worker")}`
+      : `${esc(o.check)} is ${o.status} on ${esc(o.workers[0]||"a worker")}`;
+    const why = shared
+      ? `One shared dependency, not ${o.count} sick ${plural(o.count,"worker")}. `
+        + `Fix ${esc(o.check)} and ${o.count === 1 ? "it recovers" : "they all recover"}; `
+        + `restarting ${o.count === 1 ? "it" : "them"} would not help.`
+      : `Only this worker sees it, so look at the worker before the dependency.`;
+    rows.push(`<div class="cause ${cls}">
+      <div class="count">${o.count}<small>${plural(o.count,"worker")}</small></div>
+      <div class="body">
+        <div class="title">${title}${o.critical ? " · critical" : ""}</div>
+        <div class="why">${esc(explainCategory(o.category))} — ${why}</div>
+        <div class="who">${esc(who)}</div>
+      </div>
+      <div class="act">do not restart</div>
+    </div>`);
+  });
+
+  stale.forEach(w => {
+    const why = w.restart_would_help
+      ? `The process is running and will sit there forever. This is the one `
+        + `case a restart actually repairs, and /live is already returning 503.`
+      : w.explained_by_dependency
+      ? `Explained by the dependency failure above — the handler is failing `
+        + `because something it needs is down, not because this process is `
+        + `stuck. Restarting it would not help and /live stays 200.`
+      : `${Math.round(w.queue_lag).toLocaleString()} waiting, nothing taken for `
+        + `${ago(w.silent_for_s)}. Alive, but not working.`;
+    rows.push(`<div class="cause wedged">
+      <div class="count">!<small>stale</small></div>
+      <div class="body">
+        <div class="title">${esc(w.worker)} is alive but not consuming</div>
+        <div class="why">${why}</div>
+        ${w.categories.length ? `<div class="who">${esc(w.categories.join(", "))}</div>` : ""}
+      </div>
+      <div class="act${w.restart_would_help ? " restart" : ""}">${
+        w.restart_would_help ? "restart clears this"
+        : w.explained_by_dependency ? "do not restart" : "investigate"}</div>
+    </div>`);
+  });
+
+  box.innerHTML = `<div class="rollup">${rows.join("")}</div>`;
+}
+
+/* Plain English for a category, so the row reads without a lookup table. */
+function explainCategory(c){
+  const map = {
+    connection_refused: "nothing is listening on that port",
+    connection_lost:    "the connection dropped mid-flight",
+    timeout:            "it accepted the connection but never answered",
+    slow:               "it answers, but too slowly to be useful",
+    auth_failed:        "credentials were rejected",
+    pool_exhausted:     "this worker has no free connections left — the server is fine",
+    read_only:          "a failover promoted a replica; writes are refused",
+    memory_pressure:    "the server is close to its memory limit",
+    broker_alarm:       "the broker told us to stop publishing",
+    not_consuming:      "a backlog is waiting and nothing is taking it",
+    not_subscribed:     "the connection is open but nothing is subscribed",
+    credit_exhausted:   "every prefetch slot is held by an unacked message",
+    poison_loop:        "the same message is failing over and over",
+    stalled:            "work arrives but nothing completes",
+    unknown:            "cause not reported"
+  };
+  return map[c] || c;
+}
 
 function renderKpis(){
   const list = Object.values(S.workers);
@@ -824,7 +930,7 @@ function secs(v){
 }
 
 function renderAll(){
-  renderVerdict(); renderKpis(); renderWorkers(); renderDeltas();
+  renderVerdict(); renderRollup(); renderKpis(); renderWorkers(); renderDeltas();
   renderTransitions(); renderConfig();
   const age = ((Date.now()/1000) - S.lastEvent);
   el("sub").textContent = S.connected
@@ -839,6 +945,14 @@ function applyEvent(ev){
     S.history = ev.history || {};
     S.transitions = ev.transitions || [];
     S.configs = ev.configs || {};
+    S.outages = ev.outages || [];
+    S.stale = ev.stale || [];
+  } else if (ev.type === "rollup"){
+    S.outages = ev.outages || [];
+    S.stale = ev.stale || [];
+  } else if (ev.type === "gone"){
+    delete S.workers[ev.worker];
+    delete S.history[ev.worker];
   } else if (ev.type === "config"){
     S.configs[ev.worker] = ev.config;
   } else if (ev.type === "worker"){

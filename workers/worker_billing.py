@@ -16,7 +16,7 @@ import pika
 
 import settings as S
 from pipeline import BillingPipeline, LockNotAcquired, init_schema
-from runtime import build, consume_channel
+from runtime import build, stop_consuming, supervise_consume
 
 SERVICE = os.getenv("SERVICE", "billing")
 
@@ -24,21 +24,25 @@ SERVICE = os.getenv("SERVICE", "billing")
 def main() -> int:
     ctx = build(SERVICE, runner="thread", queue=S.IN_QUEUE, pool_size=5)
     log, monitor = ctx["logger"], ctx["monitor"]
-    conn, tracker = ctx["connection"], ctx["tracker"]
+    tracker = ctx["tracker"]
 
     init_schema(ctx["engine"])
 
-    channel = consume_channel(ctx, S.IN_QUEUE)
-    channel.queue_declare(queue=S.OUT_QUEUE, durable=True)
-    channel.queue_declare(queue=S.AUDIT_QUEUE, durable=True)
+    # Rebuilt on every (re)connect, along with the consumer channel: a
+    # publisher channel bound to a connection that has gone away is the
+    # classic way a "recovered" consumer keeps failing every message.
+    out = {"channel": None}
 
-    out_channel = conn.channel()
+    def on_channel(channel) -> None:
+        channel.queue_declare(queue=S.OUT_QUEUE, durable=True)
+        channel.queue_declare(queue=S.AUDIT_QUEUE, durable=True)
+        out["channel"] = ctx["connection"].channel()
 
     def publish(body: bytes) -> None:
         # Fan out to both downstream queues so notify and reconcile each see
         # every invoice rather than competing for the same messages.
         for rk in (S.OUT_QUEUE, S.AUDIT_QUEUE):
-            out_channel.basic_publish(
+            out["channel"].basic_publish(
                 exchange="", routing_key=rk, body=body,
                 properties=pika.BasicProperties(delivery_mode=2),
             )
@@ -71,29 +75,21 @@ def main() -> int:
                     "service": SERVICE, "queue": S.IN_QUEUE,
                 })
 
-    channel.basic_consume(queue=S.IN_QUEUE, on_message_callback=on_message)
-
-    stopping = {"flag": False}
-
     def shutdown(signum, frame):
-        if stopping["flag"]:
+        if ctx["_consume"]["stopping"]:
             return
-        stopping["flag"] = True
         log.info("shutting down", extra={"service": SERVICE})
-        try:
-            channel.stop_consuming()
-        except Exception:
-            pass
+        stop_consuming(ctx)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
     try:
-        channel.start_consuming()
+        supervise_consume(ctx, S.IN_QUEUE, on_message, on_channel=on_channel)
     finally:
         ctx["health"].stop(timeout=3)
         try:
-            conn.close()
+            ctx["connection"].close()
         except Exception:
             pass
     return 0

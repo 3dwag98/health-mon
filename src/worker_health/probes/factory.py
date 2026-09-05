@@ -58,14 +58,11 @@ class ProbeFactory:
             raise ProbeConfigError(
                 f"probe {spec.name!r}: unknown type {spec.type!r}. Registered types: {known}"
             )
-        resolved = ProbeSpec(
-            type=spec.type, name=spec.name, critical=spec.critical,
-            enabled=spec.enabled, interval=spec.interval, timeout=spec.timeout,
-            failure_threshold=spec.failure_threshold,
-            success_threshold=spec.success_threshold,
-            max_silence=spec.max_silence, ttl=spec.ttl,
-        )
-        resolved.params = spec.resolved_params(context or {})
+        # Copy the whole spec rather than re-listing its fields: a
+        # field-by-field rebuild silently drops every field added later,
+        # and the builder then sees defaults the operator never wrote.
+        resolved = spec.with_params(spec.resolved_params(context or {}))
+        _promote_thresholds(resolved)
         check = builder(resolved, dict(context or {}))
         if check is None:
             raise ProbeConfigError(
@@ -75,6 +72,13 @@ class ProbeFactory:
         # config file is the source of truth for identity, and metric labels
         # and alerts are written against that name.
         check.name = spec.name
+        # Latency policy is uniform across every check type, so it is set
+        # here rather than threaded through each builder -- which also means
+        # a third-party probe gets it without doing anything.
+        if spec.latency_warn_ms is not None:
+            check.latency_warn_ms = spec.latency_warn_ms
+        if spec.latency_critical_ms is not None:
+            check.latency_critical_ms = spec.latency_critical_ms
         return check
 
     def install(self, monitor, spec: ProbeSpec, context: Mapping[str, Any] | None = None):
@@ -96,7 +100,18 @@ class ProbeFactory:
         """
         installed = []
         for raw in raw_specs or ():
-            spec = raw if isinstance(raw, ProbeSpec) else ProbeSpec.from_raw(raw)
+            # Parsing is inside the guard, not before it.  Most of the ways
+            # a probe definition can be wrong -- a timeout that does not fit
+            # its interval, a backoff ceiling under its floor -- are caught
+            # while building the spec, and leaving that outside meant
+            # `strict: false` protected against almost nothing.
+            try:
+                spec = raw if isinstance(raw, ProbeSpec) else ProbeSpec.from_raw(raw)
+            except ProbeConfigError:
+                if strict:
+                    raise
+                _install_unparsable(monitor, raw)
+                continue
             try:
                 installed.append(self.install(monitor, spec, context))
             except ProbeConfigError:
@@ -143,6 +158,31 @@ class ProbeFactory:
         return tuple(loaded)
 
 
+# Spec-level thresholds, and the param name each check type reads them
+# under.  Declaring a threshold once at the top of a probe definition and
+# having every check type understand it is the point; without this the
+# operator has to know which builder spells it which way.
+_THRESHOLD_PARAMS = {
+    "pool_warn_ratio": ("pool_warn_ratio",),
+    "pool_critical_ratio": ("pool_critical_ratio",),
+    "stale_after_seconds": ("stale_after", "max_idle"),
+}
+
+
+def _promote_thresholds(spec: ProbeSpec) -> None:
+    """Copy spec-level thresholds down into the params builders read.
+
+    An explicit param always wins: someone who wrote the low-level spelling
+    meant it, and silently overriding it would be worse than either.
+    """
+    for field, param_names in _THRESHOLD_PARAMS.items():
+        value = getattr(spec, field, None)
+        if value is None:
+            continue
+        for param in param_names:
+            spec.params.setdefault(param, value)
+
+
 def _install_broken(monitor, spec: ProbeSpec) -> None:
     """Register a placeholder that reports the misconfiguration.
 
@@ -158,6 +198,26 @@ def _install_broken(monitor, spec: ProbeSpec) -> None:
 
     check = CustomCheck(report, name=spec.name)
     monitor.register(check, name=spec.name, **spec.registration_kwargs())
+
+
+def _install_unparsable(monitor, raw) -> None:
+    """Placeholder for a definition too broken to become a spec at all.
+
+    There is no spec to take settings from, so the check is registered on
+    defaults under whatever name the definition claimed.  The point is the
+    same as above: a named failing check sends someone to the config file.
+    """
+    from ..checks.custom import CustomCheck
+    from ..core.model import Status
+
+    name = "unnamed-probe"
+    if isinstance(raw, Mapping):
+        name = str(raw.get("name") or raw.get("type") or name)
+
+    def report() -> Status:
+        return Status.FAILING
+
+    monitor.register(CustomCheck(report, name=name), name=name, critical=False)
 
 
 def default_factory(*, load_plugins: bool = False) -> ProbeFactory:

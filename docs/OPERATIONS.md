@@ -17,8 +17,11 @@ What to do when health says something is wrong, and how to run this safely.
 | Failure | Health effect | Action |
 |---|---|---|
 | Event loop wedged | `liveness: unalive`, `/live` 503 | **Restart.** This is the one a restart genuinely fixes. |
-| Consumer cancelled / unsubscribed | `rabbitmq` failing, `not_subscribed` | Recover the consumer; restart if it cannot re-subscribe. |
-| Prefetch credit exhausted | `rabbitmq` failing, `credit_exhausted` | Look for unacked messages the handler never settles. |
+| Backlog present, nothing consumed | `processing` failing, `not_consuming`, `/live` 503 | **Restart.** The process is running and will sit there forever. |
+| Handler looping on one message | `processing` failing, `poison_loop`, `/live` 503 | **Restart**, then find the message. |
+| Consumer cancelled / unsubscribed | `rabbitmq` failing, `not_subscribed`, `/live` 503 | Recover the consumer; a restart re-subscribes it. |
+| Prefetch credit exhausted | `rabbitmq` failing, `credit_exhausted`, `/live` 503 | Look for unacked messages the handler never settles. |
+| Dependency slow | check `degraded`, `slow` | **Do not restart.** `/ready` stays 200; the worker can still work. |
 | Thread pool exhausted | checks age into `unknown`, readiness `degraded` | Restart is reasonable; check for a blocking call in a handler. |
 | Database timeout | `postgres` failing, `timeout` | **Do not restart.** Back off and wait; the SDK already is. |
 | Database pool exhausted | `postgres` degraded, `pool_exhausted` | The *server* is fine. Look at connection leaks and pool size. |
@@ -125,16 +128,44 @@ module.exports = {
 ```
 
 For an external health gate, use the CLI — it is the same verdict the
-dashboard and Prometheus see:
+the dashboard and the OTLP stream see:
 
 ```bash
 worker-health --url http://127.0.0.1:8080          # exit 0 ready, 1 not
-worker-health --url http://127.0.0.1:8080 --live   # loop responsiveness only
+worker-health --url http://127.0.0.1:8080 --live   # is this process wedged?
 ```
 
 Wire a **liveness** gate to `--live` and an alert to `/ready`. Restarting on
 `/ready` is what turns a shared-database outage into a fleet-wide crash
 loop.
+
+### What `/live` answers
+
+Not "is the loop turning" but the question a supervisor actually needs: **can
+a restart fix this process.** Two things make it 503:
+
+1. **Loop lag** above `loop_lag_threshold_ms` — nothing is driving the health
+   loop, so nothing else in the process is turning either.
+2. **A fault this process did to itself** — `not_consuming`, `stalled`,
+   `not_subscribed`, `credit_exhausted`, `poison_loop`. The process is
+   running, its loop may even be turning, and it will sit there forever. A
+   restart is the remedy, and `/live` is the only signal a supervisor
+   watches. Set `live_on_self_fault: false` to keep liveness purely about
+   loop lag.
+
+Dependency verdicts never move `/live` — not `connection_refused`, not
+`timeout`, not `pool_exhausted`, not `slow`. That list is deliberately
+narrower than the restart policy's `SELF_FAULTS`, which also includes
+`connection_lost`: a lost connection is usually the dependency restarting,
+the worker reconnects on its own, and killing it destroys in-flight work for
+nothing.
+
+When `/live` does fail it says why:
+
+```json
+{"status": "unalive", "loop_lag_ms": 12.4,
+ "reasons": ["check processing reports not_consuming, which a restart can clear"]}
+```
 
 ### A Django worker command
 
@@ -253,7 +284,7 @@ Treat it as internal:
 
 ```
 bind to 127.0.0.1 or a private interface  (health_host)
-never publish /health or /metrics publicly
+never publish /health or /config publicly
 put a network policy in front of the scrape path
 rate-limit if it is reachable from anywhere shared
 ```
@@ -272,7 +303,7 @@ whose port is published deliberately. On a shared host, set
 | Instrumented query / command | one `perf_counter`, one dict lookup, one lock-guarded update |
 | Check evaluation | one probe *only* when traffic is stale; otherwise a dict read |
 | `/live` | one clock read, no lock, no snapshot |
-| `/ready`, `/health`, `/metrics` | a cached snapshot; no I/O on the request path |
+| `/ready`, `/health`, `/config` | a cached snapshot; no I/O on the request path |
 
 Under load, the probes essentially stop running: real traffic is always
 fresher than `max_silence`, so the evidence ladder never reaches rung 3.
