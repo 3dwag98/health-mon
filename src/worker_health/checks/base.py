@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..core.model import CheckResult, ErrorCategory, Evidence, Status
+from ..instrument.context import probe_scope
 
 
 @dataclass
@@ -129,8 +130,15 @@ class BaseCheck:
             return observed
 
         # 3. Nothing recent to go on.  Probe, and say so.
+        #
+        # `probe_scope` marks everything the probe does as health traffic,
+        # so auto-instrumentation ignores it.  Without that, the probe's own
+        # SELECT 1 would land in the traffic log, the next evaluation would
+        # find "recent traffic", and a silent worker would report `observed`
+        # on the strength of nothing but its own health checks.
         try:
-            result = self.probe(ctx)
+            with probe_scope():
+                result = self.probe(ctx)
         except Exception as exc:  # noqa: BLE001 - classified, never re-raised
             result = self.fail(ctx, self.classify(exc), started)
         if introspected is not None and result.status is Status.OK:

@@ -19,6 +19,8 @@ from ..core.model import CheckResult, ErrorCategory, Evidence, Status
 
 def due_checks(machine: StateMachine, now: float) -> Iterable[str]:
     for spec in machine.specs:
+        if not spec.enabled:
+            continue
         if now >= machine.state(spec.name).next_due:
             yield spec.name
 

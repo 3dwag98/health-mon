@@ -29,6 +29,10 @@ class ThreadRunner:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._inflight: dict[str, Future] = {}
+        self._started: dict[str, float] = {}
+        # Checks whose timeout has already been reported; their eventual
+        # result must not be applied on top of the timeout verdict.
+        self._timed_out: set[str] = set()
 
     def start(self) -> None:
         self._stop.clear()
@@ -54,12 +58,19 @@ class ThreadRunner:
             # Under a thread runner this measures scheduler starvation; under
             # asyncio it measures a blocked event loop.
             expected = last_beat + self._tick
-            self._m.timings.observe(T.LOOP_LAG, max(0.0, (cycle_start - expected) * 1000.0))
+            delay_ms = max(0.0, (cycle_start - expected) * 1000.0)
+            self._m.timings.observe(T.LOOP_LAG, delay_ms)
             self._m._loop_beat = cycle_start
             last_beat = cycle_start
 
             self._collect()
             self._dispatch(cycle_start)
+            # After dispatch, so a readiness change caused by this cycle's
+            # results is reported in this cycle rather than the next one.
+            try:
+                self._m.tick(delay_ms)
+            except Exception:
+                pass
 
             elapsed = time.monotonic() - cycle_start
             self._stop.wait(max(0.0, self._tick - elapsed))
@@ -80,6 +91,7 @@ class ThreadRunner:
             # Push the next due time forward immediately so a slow check is
             # not re-dispatched every tick while it is still running.
             machine.state(name).next_due = now + spec.interval
+            self._started[name] = now
             self._inflight[name] = self._pool.submit(self._run_one, name, check, ctx)
 
     def _run_one(self, name, check, ctx):
@@ -95,6 +107,7 @@ class ThreadRunner:
             result = base.error_result(
                 name, ctx.now, ctx.wall, category, "check raised"
             )
+            self._m.events.probe_error(name, category, detail="check raised")
         duration_ms = (time.perf_counter() - started) * 1000.0
         self._m.timings.observe(T.check_duration(name), duration_ms)
         if result.evidence_age_ms is not None:
@@ -102,17 +115,41 @@ class ThreadRunner:
         return result
 
     def _collect(self) -> None:
+        now = time.monotonic()
         for name, fut in list(self._inflight.items()):
             if not fut.done():
                 spec = self._m.machine.spec(name)
-                # Exceeded its timeout: record it and stop waiting.  The
-                # thread stays blocked, which is exactly what a black hole
-                # does, and the semaphore is what keeps that contained.
-                lag = self._m.timings.last(T.check_schedule_lag(name)) or 0.0
+                started = self._started.get(name)
+                # A blocking driver call cannot be cancelled from outside,
+                # so the thread stays parked on the black-holed socket --
+                # that is what a black hole does.  What must NOT happen is
+                # the monitor waiting with it: the timeout is recorded, the
+                # check is reported failing, and the pool slot is the only
+                # thing still held.
+                if started is not None and (now - started) > spec.timeout:
+                    del self._inflight[name]
+                    self._timed_out.add(name)
+                    self._started.pop(name, None)
+                    self._m.events.probe_error(
+                        name, ErrorCategory.TIMEOUT,
+                        detail="check exceeded its timeout", timeout=True,
+                    )
+                    self._m.apply(base.timeout_result(
+                        name, self._m.clock.monotonic(), self._m.clock.wall(),
+                        spec.timeout,
+                    ))
                 continue
             del self._inflight[name]
+            self._started.pop(name, None)
             try:
                 result = fut.result()
             except Exception:
+                continue
+            if name in self._timed_out:
+                # A late result from a check already reported as timed out.
+                # Applying it would silently overwrite the timeout with a
+                # stale success, so it is dropped and only the NEXT fresh
+                # evaluation is allowed to clear the failure.
+                self._timed_out.discard(name)
                 continue
             self._m.apply(result)

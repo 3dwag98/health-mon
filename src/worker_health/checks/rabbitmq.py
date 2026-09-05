@@ -50,6 +50,14 @@ class BrokerState:
         self.prefetch = 0
         self.last_probe_at: float | None = None
         self.last_delivery_at: float | None = None
+        self.last_ack_at: float | None = None
+        # Set by the broker's connection.blocked callback: the broker is up
+        # and has told us to stop publishing (memory or disk alarm).  A
+        # completely different remediation from "connection lost", so it is
+        # tracked separately rather than folded into it.
+        self.blocked = False
+        self.channel_state: str = "unknown"
+        self.consumer_state: str = "unknown"
         self.probe_error: ErrorCategory | None = None
         self.probe_channel_reopens = 0
         self.reconnects = 0
@@ -66,6 +74,10 @@ class BrokerState:
                 "prefetch": self.prefetch,
                 "last_probe_at": self.last_probe_at,
                 "last_delivery_at": self.last_delivery_at,
+                "last_ack_at": self.last_ack_at,
+                "blocked": self.blocked,
+                "channel_state": self.channel_state,
+                "consumer_state": self.consumer_state,
                 "probe_error": self.probe_error,
                 "probe_channel_reopens": self.probe_channel_reopens,
                 "reconnects": self.reconnects,
@@ -112,6 +124,8 @@ class RabbitMQCheck(BaseCheck):
             "consumers": len(s["consumer_tags"]),
             "unacked": s["unacked"],
             "prefetch": s["prefetch"],
+            "channel_state": s["channel_state"],
+            "consumer_state": s["consumer_state"],
         }
         if s["queue_depth"] is not None:
             observed["queue_depth"] = s["queue_depth"]
@@ -127,6 +141,14 @@ class RabbitMQCheck(BaseCheck):
                 ctx, ErrorCategory.CONNECTION_LOST, started,
                 evidence=Evidence.INTROSPECTED,
                 detail="worker's broker connection is closed", **observed,
+            )
+
+        if s["blocked"]:
+            return self.fail(
+                ctx, ErrorCategory.BROKER_ALARM, started,
+                evidence=Evidence.INTROSPECTED,
+                detail="broker has blocked this connection (resource alarm)",
+                **observed,
             )
 
         if s["probe_error"] is not None:

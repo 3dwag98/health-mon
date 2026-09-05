@@ -2,7 +2,16 @@
 
 Deliberately not a toy.  Each stage can fail independently and each failure
 looks different to the health system, which is what makes this worth
-demonstrating:
+demonstrating.
+
+Note what is NOT in this file: not one health call.  Every query and every
+Redis command below is recorded as observed evidence by the SQLAlchemy and
+redis-py instrumentation that setup_worker_health() installed -- the
+business code is untouched by it.  The only health-aware lines are the
+`track.stage` timers, which exist because per-stage latency is something
+only this code knows how to attribute.
+
+The stages:
 
   1. Redis   SETNX idempotency key      -- duplicate suppression
   2. Redis   per-account advisory lock  -- serialises concurrent updates
@@ -73,57 +82,47 @@ class BillingPipeline:
     # -- stages ----------------------------------------------------------- #
 
     def _seen_before(self, message_id: str) -> bool:
-        from worker_health import classify_redis
         with self.track.stage(self.queue, "redis_idempotency"):
-            with self.track.dependency("redis", classify=classify_redis):
-                fresh = self.redis.set(
-                    f"billing:seen:{message_id}", "1", nx=True, ex=3600
-                )
+            fresh = self.redis.set(
+                f"billing:seen:{message_id}", "1", nx=True, ex=3600
+            )
         return not bool(fresh)
 
     def _acquire_lock(self, account_id: str) -> str | None:
-        from worker_health import classify_redis
         token = uuid.uuid4().hex
         with self.track.stage(self.queue, "redis_lock"):
-            with self.track.dependency("redis", classify=classify_redis):
-                got = self.redis.set(
-                    f"billing:lock:{account_id}", token, nx=True, ex=self.lock_ttl
-                )
+            got = self.redis.set(
+                f"billing:lock:{account_id}", token, nx=True, ex=self.lock_ttl
+            )
         return token if got else None
 
     def _release_lock(self, account_id: str, token: str) -> None:
-        from worker_health import classify_redis
         try:
-            with self.track.dependency("redis", classify=classify_redis):
-                key = f"billing:lock:{account_id}"
-                if self.redis.get(key) == token.encode():
-                    self.redis.delete(key)
+            key = f"billing:lock:{account_id}"
+            if self.redis.get(key) == token.encode():
+                self.redis.delete(key)
         except Exception:
             pass   # the TTL will clear it; never fail a message on unlock
 
     def _apply_to_postgres(self, invoice_id, account_id, amount_cents) -> int:
-        from worker_health import classify_postgres
         with self.track.stage(self.queue, "postgres_txn"):
-            with self.track.dependency("postgres", classify=classify_postgres):
-                with self.engine.begin() as conn:
-                    conn.execute(
-                        text("INSERT INTO invoices (id, account_id, amount_cents) "
-                             "VALUES (:i, :a, :c) ON CONFLICT (id) DO NOTHING"),
-                        {"i": invoice_id, "a": account_id, "c": amount_cents},
-                    )
-                    balance = conn.execute(
-                        text("UPDATE accounts SET balance_cents = balance_cents + :c, "
-                             "updated_at = now() WHERE id = :a "
-                             "RETURNING balance_cents"),
-                        {"c": amount_cents, "a": account_id},
-                    ).scalar()
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text("INSERT INTO invoices (id, account_id, amount_cents) "
+                         "VALUES (:i, :a, :c) ON CONFLICT (id) DO NOTHING"),
+                    {"i": invoice_id, "a": account_id, "c": amount_cents},
+                )
+                balance = conn.execute(
+                    text("UPDATE accounts SET balance_cents = balance_cents + :c, "
+                         "updated_at = now() WHERE id = :a "
+                         "RETURNING balance_cents"),
+                    {"c": amount_cents, "a": account_id},
+                ).scalar()
         return int(balance or 0)
 
     def _cache_balance(self, account_id: str, balance: int) -> None:
-        from worker_health import classify_redis
         with self.track.stage(self.queue, "redis_cache"):
-            with self.track.dependency("redis", classify=classify_redis):
-                self.redis.setex(f"billing:balance:{account_id}", 300, balance)
+            self.redis.setex(f"billing:balance:{account_id}", 300, balance)
 
     def _emit(self, payload: dict) -> None:
         with self.track.stage(self.queue, "rabbitmq_publish"):

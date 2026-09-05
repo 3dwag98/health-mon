@@ -85,11 +85,16 @@ class AsyncioRunner:
             expected = last_beat + self._tick
             # On asyncio this is the real signal: if a coroutine blocks the
             # loop, this number is the length of the block.
-            self._m.timings.observe(T.LOOP_LAG, max(0.0, (cycle_start - expected) * 1000.0))
+            delay_ms = max(0.0, (cycle_start - expected) * 1000.0)
+            self._m.timings.observe(T.LOOP_LAG, delay_ms)
             self._m._loop_beat = cycle_start
             last_beat = cycle_start
 
             self._dispatch(cycle_start)
+            try:
+                self._m.tick(delay_ms)
+            except Exception:
+                pass
             try:
                 await asyncio.sleep(
                     max(0.0, self._tick - (time.monotonic() - cycle_start))
@@ -125,6 +130,9 @@ class AsyncioRunner:
             result = await asyncio.wait_for(coro, timeout=spec.timeout)
         except asyncio.TimeoutError:
             result = base.timeout_result(name, ctx.now, ctx.wall, spec.timeout)
+            self._m.events.probe_error(name, ErrorCategory.TIMEOUT,
+                                       detail="check exceeded its timeout",
+                                       timeout=True)
         except Exception as exc:  # noqa: BLE001
             category = ErrorCategory.INTERNAL
             try:
@@ -132,6 +140,7 @@ class AsyncioRunner:
             except Exception:
                 pass
             result = base.error_result(name, ctx.now, ctx.wall, category, "check raised")
+            self._m.events.probe_error(name, category, detail="check raised")
         finally:
             self._inflight.discard(name)
 

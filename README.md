@@ -9,6 +9,47 @@ wherever possible. A synthetic probe is a labelled fallback for when the worker
 has been silent, never the primary signal — a probe-first design reports healthy
 while a worker sits on a dead pooled connection.
 
+## Integration, in full
+
+```python
+from worker_health import setup_worker_health
+
+health = setup_worker_health(
+    service="billing-worker",
+    config_path="worker-health.yaml",
+    context={
+        "db_engine": engine,           # instrumented automatically
+        "redis_client": redis_client,  # instrumented automatically
+        "broker_state": broker_state,  # referenced by the rabbitmq probe
+    },
+)
+
+
+@health.tracker.handler(queue="billing.in")
+def handle(message: dict):
+    process_payment(message)           # unchanged
+```
+
+That is the whole change to worker code. It gets you `/live`, `/ready`,
+`/health`, `/metrics`, `/events`, structured JSON logs, dependency checks
+backed by real traffic, processing health, custom probes and dashboard
+metrics — with no per-query wrapping anywhere.
+
+Django and FastAPI have dedicated wiring: add one app to `INSTALLED_APPS`, or
+one `lifespan=` argument. See [docs/USAGE.md](docs/USAGE.md).
+
+## Documentation
+
+| Document | What is in it |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Component, threading, state-machine, evidence-ladder, wiring and deployment diagrams; the design decisions and what each one costs |
+| [docs/USAGE.md](docs/USAGE.md) | Step-by-step guides: generic worker, Django, FastAPI, custom probes, troubleshooting |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every setting, every probe type and its params |
+| [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) | Metric reference, structured events, Grafana dashboard, alert rules |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Failure matrix, backoff and recovery, restart policy, PM2, security |
+| [docs/INTEGRATION.md](docs/INTEGRATION.md) | The short version of the above |
+| [docs/PRIOR-ART.md](docs/PRIOR-ART.md) | What django-health-check, fastapi-health and the Celery probes do, where this differs, and which of those differences came from reading them |
+
 ## Run it
 
 Everything runs in Docker — the SDK, the workers, the dashboard and the tests.
@@ -48,7 +89,12 @@ curl http://localhost:8083/health     # reconcile
 curl http://localhost:8081/metrics    # prometheus exposition
 curl http://localhost:8081/ready      # 200 or 503, the readiness verdict
 curl http://localhost:8081/live       # loop responsiveness only
+curl http://localhost:8081/events     # the last 50 structured events
 ```
+
+`/ready` answers in the operator's vocabulary — `ready`, `degraded`,
+`unready`, `starting` — and carries a `reasons` array naming the check and
+its error category whenever the answer is not `ready`.
 
 **In PowerShell, write `curl.exe`, not `curl`** — `curl` is an alias for
 `Invoke-WebRequest` there and takes different arguments. `curl.exe` ships with
@@ -182,8 +228,14 @@ Natively, if you have Python 3.11+ and would rather not use Docker:
 
 ```
 pip install -e ".[dev]"
-pytest tests/unit -q
+pytest tests/unit -q          # 104 tests, ~5 seconds, no containers
 ```
+
+The unit tier covers the state machine, the evidence ladder, the probe
+factory, config parsing and precedence, secret redaction, auto-instrumentation
+against fake drivers, and the full engine against mocked healthy, slow and
+failed dependencies — including detection, recovery, timeout isolation and the
+HTTP status codes.
 
 ### Port conflicts
 
@@ -233,34 +285,59 @@ for that one invocation without changing any machine setting.
 
 | Check | Observed | Introspected | Probed |
 |---|---|---|---|
-| postgres | query outcome + latency from real traffic | pool checked-out / size / overflow | `SELECT 1` on an isolated NullPool connection |
-| redis | command outcome from real traffic | client pool counters | `PING` + `INFO` |
-| rabbitmq | last delivery, last ack | connection + channel state, consumer tags, unacked vs prefetch | passive declare on a dedicated channel of the worker's own connection |
+| postgres | query outcome + latency, from SQLAlchemy events | pool checked-out / size / overflow | `SELECT 1` on an isolated NullPool connection |
+| django_db | query outcome, from `CursorWrapper` | connection present, rollback flag, atomic block | `SELECT 1` on its own cursor |
+| redis | command outcome, from `execute_command` | client pool counters | `PING` + `INFO` |
+| rabbitmq | last delivery, last ack | connection + channel state, consumer tags, unacked vs prefetch, broker alarm | passive declare on a dedicated channel of the worker's own connection |
+| kafka | last poll, last delivery | assignment, rebalance state, paused, lag | — |
 | processing | received / succeeded / failed, idle time vs queue depth | — | — |
+| http · tcp · dns · disk · file_age | — | — | read-only request, connect, resolve, or `statvfs` |
 
 Every result carries `evidence` — `observed`, `introspected` or `probed` — so a
-probe-backed green never looks like a traffic-backed green.
+probe-backed green never looks like a traffic-backed green, and
+`evidence_age_ms` says how old the signal behind it was.
 
-## Integration
+The observed column is **automatic**: `setup_worker_health()` instruments
+SQLAlchemy, the Django ORM, redis-py (sync and async) and pika from the
+clients you pass it. Business code wraps nothing. Probes run only after
+`max_silence` seconds without real traffic, and never count as traffic
+themselves — a `ContextVar` suppresses them, so a silent worker can never look
+busy on the strength of its own health checks.
 
-    from worker_health import HealthMonitor, Tracker
+## Extending it
 
-    monitor = HealthMonitor("billing", runner="thread")
-    tracker = Tracker(monitor, processing_state, default_queue="billing.in")
+Probes are declarative and pluggable. Thirteen types ship built in —
+`postgres`, `django_db`, `redis`, `rabbitmq`, `kafka`, `http`, `tcp`, `dns`,
+`disk`, `file_age`, `function`, `processing`, `sqlalchemy` — and your own
+register the same way the built-ins do:
 
-    @tracker.handler(queue="billing.in")
-    def handle(body): ...
+```python
+@factory.probe_type("vendor-api")
+def build_vendor_probe(spec, context):
+    return HttpProbe(url=spec.params["url"], timeout=spec.timeout)
+```
 
-See `workers/` for three complete workers and `docs/` for the PM2 example.
+Another distribution can ship probe types for a whole firm through entry
+points under `worker_health.probes`; `factory.load_plugins()` finds them with
+no import from this package.
+
+See `workers/` for three complete workers, `examples/` for Django and FastAPI
+ones, `deploy/` for Prometheus rules and a Grafana dashboard, and `docs/` for
+the PM2 example.
 
 ## Versions
 
-Pinned deliberately: Postgres 16, RabbitMQ 3.13, **Redis 5.0.6**.
+Pinned deliberately: **Postgres 16, Redis 7.2, RabbitMQ 3.10**.
 
-Redis 5.0.6 has no `HELLO`, so redis-py 6+ (which negotiates RESP3 by default)
-fails on *every* command. `build_client()` pins `protocol=2`. A caller-supplied
-client that gets this wrong is reported as `dependency_version`, not
-`connection_refused`.
+Redis 7.2 implements `HELLO`, so RESP2/RESP3 negotiation is a non-issue and
+`build_client()` leaves the protocol at the client default. What it does
+guarantee is the setting that actually breaks health checks: socket timeouts.
+redis-py leaves them as `None`, and a probe on a black-holed connection then
+hangs forever — holding a pool slot and reporting nothing, which is strictly
+worse than no probe at all. A client pointed at a server too old for `HELLO`
+is reported as `dependency_version`, not `connection_refused`, because the fix
+is a client setting rather than a network to investigate.
 
-`/api/aliveness-test` is never used: on 3.13 it declares a queue, publishes and
-consumes a message, which violates the non-destructive guardrail.
+RabbitMQ's `/api/aliveness-test` is never used: on 3.10 it declares a queue,
+publishes and consumes a message, which violates the non-destructive
+guardrail. It became a no-op only in 4.0.

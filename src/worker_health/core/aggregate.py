@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .clock import Clock
 from .machine import StateMachine
-from .model import SEVERITY, Status
+from .model import SEVERITY, Liveness, Readiness, Status
 
 
 def aggregate(
@@ -12,7 +12,7 @@ def aggregate(
     boot_deadline: float | None,
 ) -> Status:
     """Readiness verdict across every registered check."""
-    specs = machine.specs
+    specs = machine.enabled_specs()
     if not specs:
         return Status.OK
 
@@ -29,6 +29,8 @@ def aggregate(
     worst = Status.OK
     for spec in specs:
         v = effective[spec.name]
+        if v is Status.DISABLED:
+            continue            # switched off; it has no opinion
         if v is Status.STARTING:
             v = Status.DEGRADED
         if v is Status.FAILING and not spec.critical:
@@ -42,7 +44,51 @@ def aggregate(
 
 def boot_complete(machine: StateMachine) -> bool:
     """True once every critical check has been observed OK at least once."""
-    for spec in machine.specs:
+    for spec in machine.enabled_specs():
         if spec.critical and machine.state(spec.name).last_ok_at is None:
             return False
     return True
+
+
+def readiness(status: Status, liveness: Liveness) -> Readiness:
+    """Project the aggregate onto the worker-level vocabulary.
+
+    A wedged loop outranks everything: a process that cannot turn its loop
+    cannot process work, however healthy its dependencies look.
+    """
+    from .model import READINESS_FROM_STATUS
+
+    if liveness is Liveness.UNALIVE:
+        return Readiness.UNREADY
+    return READINESS_FROM_STATUS[status]
+
+
+def reasons(machine: StateMachine, liveness: Liveness) -> tuple[str, ...]:
+    """Why readiness is what it is, in the operator's words.
+
+    Named checks and closed categories only -- never a driver message, which
+    is where DSNs live.  This is what turns a 503 into an actionable page
+    instead of a puzzle.
+    """
+    out: list[str] = []
+    if liveness is Liveness.UNALIVE:
+        out.append("event loop lag above threshold")
+
+    for spec in machine.enabled_specs():
+        state = machine.effective(spec.name)
+        if state is Status.FAILING:
+            category = _category(machine, spec.name)
+            kind = "critical" if spec.critical else "non-critical"
+            out.append(f"{kind} check {spec.name} is failing ({category})")
+        elif state is Status.DEGRADED:
+            out.append(f"check {spec.name} is degraded ({_category(machine, spec.name)})")
+        elif state is Status.UNKNOWN:
+            out.append(f"check {spec.name} has no current measurement")
+    return tuple(out)
+
+
+def _category(machine: StateMachine, name: str) -> str:
+    result = machine.state(name).last_result
+    if result is None or result.category is None:
+        return "unknown"
+    return result.category.value

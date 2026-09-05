@@ -15,6 +15,33 @@ from ..core.model import CheckResult, ErrorCategory, Evidence, Status
 from .base import BaseCheck, CheckContext
 
 
+class QueueCounters:
+    """One queue's slice of the processing counters.
+
+    Per-queue as well as aggregate because a worker consuming two queues
+    can be perfectly healthy on one and completely stalled on the other,
+    and a single set of counters averages that away.
+    """
+
+    __slots__ = ("received", "succeeded", "failed", "in_flight",
+                 "last_received_at", "last_success_at", "last_failure_at",
+                 "consecutive_failures", "last_duration_ms")
+
+    def __init__(self) -> None:
+        self.received = 0
+        self.succeeded = 0
+        self.failed = 0
+        self.in_flight = 0
+        self.last_received_at: float | None = None
+        self.last_success_at: float | None = None
+        self.last_failure_at: float | None = None
+        self.consecutive_failures = 0
+        self.last_duration_ms: float | None = None
+
+    def read(self) -> dict:
+        return {k: getattr(self, k) for k in self.__slots__}
+
+
 class ProcessingState:
     """Counters written by the @track.handler decorator."""
 
@@ -30,32 +57,69 @@ class ProcessingState:
         self.consecutive_failures = 0
         self.last_duration_ms: float | None = None
         self.started_at = time.monotonic()
+        self._queues: dict[str, QueueCounters] = {}
 
-    def on_receive(self) -> float:
+    def _queue(self, queue: str | None) -> QueueCounters | None:
+        if not queue:
+            return None
+        counters = self._queues.get(queue)
+        if counters is None:
+            counters = self._queues[queue] = QueueCounters()
+        return counters
+
+    def on_receive(self, queue: str | None = None) -> float:
         with self._lock:
+            now = time.monotonic()
             self.received += 1
             self.in_flight += 1
-            self.last_received_at = time.monotonic()
-            return self.last_received_at
+            self.last_received_at = now
+            q = self._queue(queue)
+            if q is not None:
+                q.received += 1
+                q.in_flight += 1
+                q.last_received_at = now
+            return now
 
-    def on_success(self, duration_ms: float) -> None:
+    def on_success(self, duration_ms: float, queue: str | None = None) -> None:
         with self._lock:
+            now = time.monotonic()
             self.succeeded += 1
             self.in_flight = max(0, self.in_flight - 1)
             self.consecutive_failures = 0
-            self.last_success_at = time.monotonic()
+            self.last_success_at = now
             self.last_duration_ms = duration_ms
+            q = self._queue(queue)
+            if q is not None:
+                q.succeeded += 1
+                q.in_flight = max(0, q.in_flight - 1)
+                q.consecutive_failures = 0
+                q.last_success_at = now
+                q.last_duration_ms = duration_ms
 
-    def on_failure(self, duration_ms: float) -> None:
+    def on_failure(self, duration_ms: float, queue: str | None = None) -> None:
         with self._lock:
+            now = time.monotonic()
             self.failed += 1
             self.in_flight = max(0, self.in_flight - 1)
             self.consecutive_failures += 1
-            self.last_failure_at = time.monotonic()
+            self.last_failure_at = now
             self.last_duration_ms = duration_ms
+            q = self._queue(queue)
+            if q is not None:
+                q.failed += 1
+                q.in_flight = max(0, q.in_flight - 1)
+                q.consecutive_failures += 1
+                q.last_failure_at = now
+                q.last_duration_ms = duration_ms
 
-    def read(self) -> dict:
+    def read(self, queue: str | None = None) -> dict:
+        """Aggregate counters, or one queue's if a name is given."""
         with self._lock:
+            if queue is not None:
+                counters = self._queues.get(queue)
+                data = counters.read() if counters else QueueCounters().read()
+                data["started_at"] = self.started_at
+                return data
             return dict(
                 received=self.received, succeeded=self.succeeded, failed=self.failed,
                 in_flight=self.in_flight, last_received_at=self.last_received_at,
@@ -63,6 +127,10 @@ class ProcessingState:
                 consecutive_failures=self.consecutive_failures,
                 last_duration_ms=self.last_duration_ms, started_at=self.started_at,
             )
+
+    def queues(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._queues)
 
 
 class ProcessingCheck(BaseCheck):

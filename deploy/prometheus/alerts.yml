@@ -1,0 +1,116 @@
+# Alert rules for worker-health.
+#
+# Every rule here is written against the BINARY series (worker_health_ready,
+# worker_health_check_status) rather than the severity gauges: `== 0` cannot
+# be misread, and it keeps working if a status value is ever added.
+#
+# The `for:` durations matter as much as the expressions. The SDK already
+# applies failure thresholds and hysteresis, so these windows exist to
+# absorb scrape gaps and restarts, not to re-do the debouncing.
+
+groups:
+  - name: worker-health
+    rules:
+      # The headline. Fires when /ready would return 503 -- a critical
+      # dependency is failing, the worker is stuck, or the loop is wedged.
+      - alert: WorkerNotReady
+        expr: worker_health_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}/{{ $labels.instance }} is not ready"
+          description: >
+            The worker is running but cannot safely process work. Check
+            /ready on the worker for the reasons list.
+
+      # Liveness is a separate page because the remediation is different:
+      # this one a restart actually fixes.
+      - alert: WorkerNotAlive
+        expr: worker_health_live == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}/{{ $labels.instance }} loop is not turning"
+          description: "Event loop or scheduler is wedged. A restart is appropriate here."
+
+      - alert: CriticalDependencyFailing
+        expr: worker_health_check_status{critical="true"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.check }} failing for {{ $labels.service }}"
+          description: >
+            Category is on worker_health_check_error. Do NOT restart workers
+            for a dependency fault -- it converts one outage into a
+            crash-loop against a service already in trouble.
+
+      - alert: NonCriticalDependencyFailing
+        expr: worker_health_check_status{critical="false"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.check }} degraded for {{ $labels.service }}"
+
+      # The signature this whole project exists to detect: work is waiting
+      # and the consumer is not taking it. Neither half alerts on its own --
+      # a deep queue with a busy consumer is fine, and a silent consumer on
+      # an empty queue is fine.
+      - alert: SilentConsumerWithBacklog
+        expr: |
+          worker_health_queue_lag > 100
+          and on (service, instance, queue)
+          worker_health_last_message_age_seconds > 120
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is not consuming {{ $labels.queue }}"
+          description: "Backlog present and nothing received for over two minutes."
+
+      - alert: WorkerLoopLagHigh
+        expr: worker_health_loop_lag_ms > 2000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} health loop is slipping"
+
+      - alert: WorkerFailureRateHigh
+        expr: |
+          sum by (service, instance, queue) (rate(worker_health_message_failure_total[5m]))
+          /
+          clamp_min(sum by (service, instance, queue) (rate(worker_health_message_received_total[5m])), 0.001)
+          > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} is failing more than 20% of messages"
+
+      # A green light backed by stale evidence is the failure mode that
+      # makes health systems untrustworthy. This is the alert for it.
+      - alert: HealthEvidenceStale
+        expr: worker_health_oldest_eval_age_ms > 120000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} health data is stale"
+          description: >
+            No check has been evaluated recently. The reported status may be
+            describing a state that no longer exists.
+
+      # The scrape itself failing is not the same as the worker being
+      # unready, and it needs its own line or an unreachable worker looks
+      # healthy by absence.
+      - alert: WorkerHealthEndpointDown
+        expr: up{job="worker-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "worker-health endpoint unreachable on {{ $labels.scrape_target }}"
